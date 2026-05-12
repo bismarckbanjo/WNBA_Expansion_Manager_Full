@@ -59,6 +59,9 @@ function freshState() {
     },
     gameDay: null,
     postGame: null,
+    playoffs: null,
+    awards: [],
+    pendingAwards: null,
     log: [],
     objectives: [
       { id: "roster11", text: "Draft at least 11 players", done: false },
@@ -95,6 +98,18 @@ function migrate(s) {
   }
   if (s.gameDay === undefined) s.gameDay = null;
   if (s.postGame === undefined) s.postGame = null;
+  if (s.playoffs === undefined) s.playoffs = null;
+  if (!Array.isArray(s.awards)) s.awards = [];
+  if (s.pendingAwards === undefined) s.pendingAwards = null;
+  // Stats foundations for every player
+  const ensureStats = (p) => {
+    if (!p.seasonStats) p.seasonStats = { gp: 0, pts: 0, reb: 0, ast: 0, w: 0 };
+    if (p.compositeAtStart === undefined) p.compositeAtStart = null;
+    if (p.rookieYear === undefined) p.rookieYear = null;
+  };
+  (s.roster || []).forEach(ensureStats);
+  (s.waived || []).forEach(ensureStats);
+  (s.teams || []).forEach((t) => (t.players || []).forEach(ensureStats));
   // Ensure injury field on every player record (fatigue field is left orphaned for backward compat)
   const ensureInjury = (p) => {
     if (p.injury === undefined) p.injury = null;
@@ -259,6 +274,7 @@ function topbar() {
     offseason: "Offseason",
     coaching: "Coaching",
     admin: "Admin · Custom Rookies",
+    awards: "Season Awards",
   };
   const title = S.offseason ? "Offseason " + S.year : titles[tab];
   const sub = S.offseason
@@ -268,8 +284,11 @@ function topbar() {
 }
 function content() {
   if (S.offseason) return offseasonView();
+  if (tab === "awards" && S.pendingAwards) return awardsView();
   if (S.postGame && tab === "schedule") return postGameView();
   if (S.gameDay && tab === "schedule") return gameDayView();
+  if (S.playoffs && S.playoffs.active && tab === "schedule")
+    return playoffsView();
   return {
     dashboard: dashboard(),
     draft: draft(),
@@ -704,12 +723,40 @@ function league() {
             .join(", ") || "none"
         }</p><button class="btn secondary" data-teamview="${t.id}">Open Roster</button></div></section>`,
     )
-    .join("")}</div>`;
+    .join("")}</div>${statsLeadersSection()}`;
+}
+function statsLeadersSection() {
+  const allPlayers = [
+    ...S.roster.map((p) => ({ p, teamId: S.team.abbr })),
+    ...S.teams.flatMap((t) => t.players.map((pl) => ({ p: pl, teamId: t.id }))),
+  ];
+  const withStats = allPlayers.filter(
+    (x) => x.p.seasonStats && x.p.seasonStats.gp > 0,
+  );
+  if (!withStats.length)
+    return `<section class="card" style="margin-top:18px"><div class="sectionTitle"><h3>Stats Leaders</h3><span>play games to populate</span></div><div class="cardPad"><div class="empty">No games played yet this season.</div></div></section>`;
+  const per = (x, k) => x.p.seasonStats[k] / Math.max(1, x.p.seasonStats.gp);
+  const leaderRows = (key, label, fmt) =>
+    withStats
+      .slice()
+      .sort((a, b) => per(b, key) - per(a, key))
+      .slice(0, 5)
+      .map(
+        (x, i) =>
+          `<tr><td>${i + 1}</td><td><div style="display:flex;gap:8px;align-items:center">${portraitHtml(x.p, "sm")}<div><div class="playerName">${x.p.name}</div><div class="mini">${x.teamId} · ${x.p.seasonStats.gp} GP</div></div></div></td><td><b>${fmt(per(x, key))}</b></td></tr>`,
+      )
+      .join("");
+  const table = (key, label, fmt) =>
+    `<section class="card"><div class="sectionTitle"><h3>${label}</h3><span>per game</span></div><table class="table"><thead><tr><th>#</th><th>Player</th><th>${label.split(" ")[0]}</th></tr></thead><tbody>${leaderRows(key, label, fmt)}</tbody></table></section>`;
+  const f = (v) => v.toFixed(1);
+  return `<div style="margin-top:18px"><h3>Stats Leaders</h3><div class="layout3" style="margin-top:10px">${table("pts", "Points", f)}${table("reb", "Rebounds", f)}${table("ast", "Assists", f)}</div></div>`;
 }
 
 function ensureSeason(force = false) {
   if (!S.started) return;
   if (!S.season || force) {
+    resetSeasonStats();
+    snapshotComposites();
     S.season = {
       currentGameIndex: 0,
       schedule: generateSchedule(),
@@ -969,61 +1016,114 @@ window.simTest = function (seasons = 20) {
   console.table(rows);
   return rows;
 };
-function topPerformers(id, ptsFor) {
-  const players = teamMeta(id)
-    .players.slice()
-    .sort((a, b) => tradeValue(b) - tradeValue(a))
-    .slice(0, 7);
-  if (!players.length) return [];
-  const out = [];
+// Distribute game stats across top-8 rotation and accumulate season totals.
+// Returns top-3 box-score lines for backward-compat display.
+function distributeAndRecord(id, ptsFor, won) {
+  const team = teamMeta(id);
+  const healthy = team.players
+    .slice()
+    .filter((p) => !p.injury)
+    .sort((a, b) => composite(b) - composite(a))
+    .slice(0, 8);
+  if (!healthy.length) return [];
   let remaining = Math.max(40, ptsFor);
-  players.slice(0, 3).forEach((p, i) => {
+  const rotation = [];
+  healthy.slice(0, 3).forEach((p, i) => {
     const pts = i === 0 ? rand(16, 28) : i === 1 ? rand(11, 21) : rand(7, 16);
     remaining -= pts;
-    out.push({
-      name: p.name,
-      pos: p.pos,
+    rotation.push({
+      player: p,
       pts,
       reb: rand(p.pos.includes("C") ? 5 : 2, p.pos.includes("G") ? 7 : 11),
       ast: rand(p.pos.includes("G") ? 4 : 1, p.pos.includes("C") ? 4 : 8),
     });
   });
-  return out;
+  const bench = healthy.slice(3);
+  bench.forEach((p) => {
+    const share = Math.max(
+      0,
+      Math.round(remaining / Math.max(1, bench.length)),
+    );
+    const pts = Math.max(0, Math.min(14, share + rand(-2, 4)));
+    remaining -= pts;
+    rotation.push({
+      player: p,
+      pts,
+      reb: rand(0, p.pos.includes("C") ? 5 : 3),
+      ast: rand(0, p.pos.includes("G") ? 3 : 2),
+    });
+  });
+  rotation.forEach((r) => {
+    if (!r.player.seasonStats)
+      r.player.seasonStats = { gp: 0, pts: 0, reb: 0, ast: 0, w: 0 };
+    r.player.seasonStats.gp += 1;
+    r.player.seasonStats.pts += r.pts;
+    r.player.seasonStats.reb += r.reb;
+    r.player.seasonStats.ast += r.ast;
+    if (won) r.player.seasonStats.w += 1;
+  });
+  return rotation.slice(0, 3).map((r) => ({
+    name: r.player.name,
+    pos: r.player.pos,
+    pts: r.pts,
+    reb: r.reb,
+    ast: r.ast,
+  }));
+}
+function resetSeasonStats() {
+  const z = (p) => {
+    p.seasonStats = { gp: 0, pts: 0, reb: 0, ast: 0, w: 0 };
+  };
+  S.roster.forEach(z);
+  S.waived.forEach(z);
+  S.teams.forEach((t) => t.players.forEach(z));
+}
+function snapshotComposites() {
+  const snap = (p) => {
+    p.compositeAtStart = composite(p);
+  };
+  S.roster.forEach(snap);
+  S.teams.forEach((t) => t.players.forEach(snap));
 }
 function simulateGame(g) {
   if (!g || g.played) return;
   const r = simScore(g.home, g.away, g);
   rollInjuries(g);
+  const winner = r.hs > r.as ? g.home : g.away;
+  const homeBox = distributeAndRecord(g.home, r.hs, winner === g.home);
+  const awayBox = distributeAndRecord(g.away, r.as, winner === g.away);
   Object.assign(g, {
     played: true,
     homeScore: r.hs,
     awayScore: r.as,
-    winner: r.hs > r.as ? g.home : g.away,
-    box: {
-      home: topPerformers(g.home, r.hs),
-      away: topPerformers(g.away, r.as),
-    },
+    winner,
+    box: { home: homeBox, away: awayBox },
   });
-  [g.home, g.away].forEach((id) => {
-    const rec = seasonRecord(id);
-    const pf = id === g.home ? r.hs : r.as,
-      pa = id === g.home ? r.as : r.hs;
-    rec.pf += pf;
-    rec.pa += pa;
-    if (id === g.winner) {
-      rec.w++;
-      rec.streak =
-        rec.streak && rec.streak.startsWith("W")
-          ? "W" + (parseInt(rec.streak.slice(1) || "1") + 1)
-          : "W1";
-    } else {
-      rec.l++;
-      rec.streak =
-        rec.streak && rec.streak.startsWith("L")
-          ? "L" + (parseInt(rec.streak.slice(1) || "1") + 1)
-          : "L1";
-    }
-  });
+  // Standings updates are regular-season only; playoff series tracked separately.
+  if (!g.playoff) {
+    [g.home, g.away].forEach((id) => {
+      const rec = seasonRecord(id);
+      const pf = id === g.home ? r.hs : r.as,
+        pa = id === g.home ? r.as : r.hs;
+      rec.pf += pf;
+      rec.pa += pa;
+      if (id === g.winner) {
+        rec.w++;
+        rec.streak =
+          rec.streak && rec.streak.startsWith("W")
+            ? "W" + (parseInt(rec.streak.slice(1) || "1") + 1)
+            : "W1";
+      } else {
+        rec.l++;
+        rec.streak =
+          rec.streak && rec.streak.startsWith("L")
+            ? "L" + (parseInt(rec.streak.slice(1) || "1") + 1)
+            : "L1";
+      }
+    });
+  } else {
+    onPlayoffGameComplete(g);
+  }
   S.season.results.unshift(g.id);
   addLog(
     g.home === S.team.abbr || g.away === S.team.abbr
@@ -1055,6 +1155,9 @@ function nextUserGame() {
 // Fast-forward all NPC games chronologically up to (but not including) the user's next game,
 // then queue the user's game in S.gameDay so the Game Day view appears.
 function simNextGame() {
+  if (S.playoffs && S.playoffs.active && !S.playoffs.complete) {
+    return simNextPlayoffGame();
+  }
   ensureSeason();
   const mine = nextUserGame();
   if (!mine) {
@@ -1082,7 +1185,13 @@ function simNextGame() {
 }
 function playQueuedGame() {
   if (!S.gameDay) return;
-  const g = S.season.schedule.find((x) => x.id === S.gameDay.gameId);
+  let g = null;
+  if (S.gameDay.source === "playoff") {
+    const found = findPlayoffGame(S.gameDay.gameId);
+    g = found ? found.game : null;
+  } else {
+    g = S.season.schedule.find((x) => x.id === S.gameDay.gameId);
+  }
   if (!g) {
     S.gameDay = null;
     save();
@@ -1090,7 +1199,7 @@ function playQueuedGame() {
   }
   simulateGame(g);
   S.gameDay = null;
-  S.postGame = { gameId: g.id };
+  S.postGame = { gameId: g.id, source: g.playoff ? "playoff" : "season" };
   save();
   render();
 }
@@ -1148,7 +1257,7 @@ function schedulePage() {
   const next = myGames[0];
   const allDone = S.season.schedule.every((g) => g.played);
   const offseasonBtn = allDone
-    ? '<button class="btn" data-action="enterOffseason">Advance to Offseason →</button>'
+    ? '<button class="btn" data-action="enterPlayoffs">Enter Playoffs →</button>'
     : "";
   const heroBlock = next
     ? nextGameHero(next)
@@ -1206,7 +1315,10 @@ function currentFocusLabel() {
 }
 function gameDayView() {
   if (!S.gameDay) return `<div class="empty">No game queued.</div>`;
-  const g = S.season.schedule.find((x) => x.id === S.gameDay.gameId);
+  const g =
+    S.gameDay.source === "playoff"
+      ? (findPlayoffGame(S.gameDay.gameId) || {}).game
+      : S.season.schedule.find((x) => x.id === S.gameDay.gameId);
   if (!g) {
     S.gameDay = null;
     return `<div class="empty">Game not found. <button class="btn secondary" data-action="closeGameDay">Back</button></div>`;
@@ -1240,9 +1352,15 @@ function gameDayView() {
   const rotationTable = `<table class="table"><thead><tr><th>Player</th><th>Pos</th><th>Status</th><th>Mood</th></tr></thead><tbody>${topRotation.map((p) => `<tr style="${p.injury ? "opacity:.5" : ""}"><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div class="playerName">${p.name}</div></div></td><td>${p.pos}</td><td>${injuryBadge(p)}</td><td>${p.mood || 60}</td></tr>`).join("")}</tbody></table>`;
   return `<section class="card"><div class="sectionTitle"><h3>Game Day · Week ${g.week} · ${isHome ? "vs" : "at"} ${opp.name}</h3><span>${opp.id} ${oppRec.w}-${oppRec.l}</span></div><div class="cardPad"><div class="layout2"><section><h3 style="margin-top:0">Opponent</h3><p class="muted">${opp.name} · ${oppRec.w}-${oppRec.l} · power index ${oppPower.overall}</p>${scoutBlock}<h3 style="margin-top:18px">Your Game Plan</h3>${planBlock}</section><section><h3 style="margin-top:0">Your Prep</h3><p class="muted">Weekly Focus: <b>${currentFocusLabel()}</b></p><p class="muted">Plan: <b>${gp.plan === "pack" ? "Pack the Paint" : gp.plan === "extend" ? "Extend Defense" : "Not set"}</b></p><p class="muted">Power Index: <b>${myPower.overall}</b> · Per ${myPower.perO}/${myPower.perD} · Int ${myPower.intO}/${myPower.intD}</p><p class="muted">Injured players: <b>${injuredCount}</b></p></section></div><h3 style="margin-top:18px">Top-8 Rotation</h3>${rotationTable}<div class="actions" style="margin-top:18px"><button class="btn" data-action="playQueuedGame" style="font-size:15px;padding:14px 20px">Play Game →</button><button class="btn secondary" data-action="closeGameDay">Hold Off</button></div></div></section>`;
 }
+function findAnyGame(gameId) {
+  const reg = S.season && S.season.schedule.find((x) => x.id === gameId);
+  if (reg) return reg;
+  const p = findPlayoffGame(gameId);
+  return p ? p.game : null;
+}
 function postGameView() {
   if (!S.postGame) return '<div class="empty">No recent game.</div>';
-  const g = S.season.schedule.find((x) => x.id === S.postGame.gameId);
+  const g = findAnyGame(S.postGame.gameId);
   if (!g) {
     S.postGame = null;
     return '<div class="empty">Game not found.</div>';
@@ -1552,6 +1670,12 @@ function actions(a) {
   if (a === "playQueuedGame") playQueuedGame();
   if (a === "closeGameDay") closeGameDay();
   if (a === "closePostGame") closePostGame();
+  if (a === "enterPlayoffs") enterPlayoffs();
+  if (a === "simNextPlayoffGame") simNextPlayoffGame();
+  if (a === "simPlayoffsToEnd") simPlayoffsToEnd();
+  if (a === "openAwards") openAwards();
+  if (a === "acceptAwards") acceptAwards();
+  if (a === "closeAwards") closeAwards();
 }
 function draftPlayer(id) {
   const team = S.teams.find((t) => t.players.some((p) => p.id === id));
@@ -1988,6 +2112,8 @@ function processAiPicks() {
     if (tm) {
       const r = clone(chosen);
       r.team = teamId;
+      r.rookieYear = S.year + 1;
+      r.seasonStats = { gp: 0, pts: 0, reb: 0, ast: 0, w: 0 };
       tm.players.push(r);
     }
     S.offseason.currentPickIdx++;
@@ -2025,6 +2151,8 @@ function userPickRookie(playerId) {
   });
   const r = clone(p);
   r.team = S.team.abbr;
+  r.rookieYear = S.year + 1;
+  r.seasonStats = { gp: 0, pts: 0, reb: 0, ast: 0, w: 0 };
   S.roster.push(r);
   addLog(
     "Rookie drafted",
@@ -2147,6 +2275,363 @@ function offseasonDoneView() {
     .join(
       "",
     )}</div><div class="actions" style="margin-top:18px"><button class="btn" data-action="startNextSeason">Start ${S.year + 1} Season</button></div></div></section>`;
+}
+
+// =================== PLAYOFFS: bracket + series + sim =====================
+const HOME_PATTERNS = {
+  3: ["top", "bot", "top"],
+  5: ["top", "top", "bot", "bot", "top"],
+  7: ["top", "top", "bot", "bot", "top", "bot", "top"],
+};
+function makeSeries(id, round, bestOf, top, bot, topSeed, botSeed) {
+  const pattern = HOME_PATTERNS[bestOf] || HOME_PATTERNS[3];
+  const games = pattern.map((h, i) => ({
+    id: `${id}-G${i + 1}`,
+    home: h === "top" ? top : bot,
+    away: h === "top" ? bot : top,
+    week: 17 + round, // playoff weeks: 18, 19, 20
+    played: false,
+    homeScore: null,
+    awayScore: null,
+    winner: null,
+    box: null,
+    playoff: true,
+    seriesId: id,
+    gameNum: i + 1,
+  }));
+  return {
+    id,
+    round,
+    bestOf,
+    top,
+    bot,
+    topSeed,
+    botSeed,
+    topWins: 0,
+    botWins: 0,
+    games,
+    winner: null,
+  };
+}
+function enterPlayoffs() {
+  if (!S.season) return toast("No regular season to seed from.");
+  const standings = standingsRows();
+  if (standings.length < 8)
+    return toast("Need at least 8 teams to run a playoff.");
+  const top8 = standings.slice(0, 8);
+  const pairs = [
+    [0, 7],
+    [3, 4],
+    [1, 6],
+    [2, 5],
+  ];
+  const r1 = pairs.map((p, i) =>
+    makeSeries(
+      `R1-${i + 1}`,
+      1,
+      3,
+      top8[p[0]].id,
+      top8[p[1]].id,
+      p[0] + 1,
+      p[1] + 1,
+    ),
+  );
+  S.playoffs = {
+    active: true,
+    currentRound: 1,
+    rounds: [
+      { round: 1, bestOf: 3, series: r1 },
+      { round: 2, bestOf: 5, series: [] },
+      { round: 3, bestOf: 7, series: [] },
+    ],
+    champion: null,
+    complete: false,
+    seedMap: Object.fromEntries(top8.map((t, i) => [t.id, i + 1])),
+  };
+  tab = "schedule";
+  addLog(
+    "Playoffs",
+    `${S.year} regular season closed. Top 8 seeded. Round 1 underway.`,
+  );
+  save();
+  render();
+}
+function findPlayoffGame(gameId) {
+  if (!S.playoffs) return null;
+  for (const round of S.playoffs.rounds) {
+    for (const s of round.series) {
+      const g = s.games.find((x) => x.id === gameId);
+      if (g) return { game: g, series: s, round };
+    }
+  }
+  return null;
+}
+function onPlayoffGameComplete(g) {
+  if (!S.playoffs || !g.seriesId) return;
+  const found = findPlayoffGame(g.id);
+  if (!found) return;
+  const series = found.series;
+  if (g.winner === series.top) series.topWins++;
+  else series.botWins++;
+  const winsNeeded = Math.ceil(series.bestOf / 2);
+  if (series.topWins >= winsNeeded) series.winner = series.top;
+  else if (series.botWins >= winsNeeded) series.winner = series.bot;
+  if (series.winner) {
+    addLog(
+      "Series final",
+      `${teamMeta(series.winner).name} won the series vs ${teamMeta(series.winner === series.top ? series.bot : series.top).name} ${series.topWins}-${series.botWins}.`,
+    );
+    advancePlayoffRound();
+  }
+}
+function advancePlayoffRound() {
+  if (!S.playoffs) return;
+  const curIdx = S.playoffs.currentRound - 1;
+  const cur = S.playoffs.rounds[curIdx];
+  if (cur.series.some((s) => !s.winner)) return; // not all done yet
+  if (S.playoffs.currentRound === 3) {
+    S.playoffs.champion = cur.series[0].winner;
+    S.playoffs.complete = true;
+    S.pendingAwards = computeAwards();
+    addLog(
+      "Champion",
+      `${teamMeta(S.playoffs.champion).name} are the ${S.year} champions.`,
+    );
+    save();
+    return;
+  }
+  S.playoffs.currentRound += 1;
+  const nextR = S.playoffs.rounds[S.playoffs.currentRound - 1];
+  const seedOf = (id) => S.playoffs.seedMap[id] || 99;
+  const orderTopBot = (a, b) => {
+    const sa = seedOf(a),
+      sb = seedOf(b);
+    return sa < sb ? [a, b, sa, sb] : [b, a, sb, sa];
+  };
+  if (S.playoffs.currentRound === 2) {
+    const w1 = cur.series.find((s) => s.id === "R1-1").winner; // 1v8
+    const w2 = cur.series.find((s) => s.id === "R1-2").winner; // 4v5
+    const w3 = cur.series.find((s) => s.id === "R1-3").winner; // 2v7
+    const w4 = cur.series.find((s) => s.id === "R1-4").winner; // 3v6
+    const [a, b, sa, sb] = orderTopBot(w1, w2);
+    const [c, d, sc, sd] = orderTopBot(w3, w4);
+    nextR.series = [
+      makeSeries("R2-1", 2, 5, a, b, sa, sb),
+      makeSeries("R2-2", 2, 5, c, d, sc, sd),
+    ];
+  } else if (S.playoffs.currentRound === 3) {
+    const w1 = cur.series.find((s) => s.id === "R2-1").winner;
+    const w2 = cur.series.find((s) => s.id === "R2-2").winner;
+    const [a, b, sa, sb] = orderTopBot(w1, w2);
+    nextR.series = [makeSeries("R3-1", 3, 7, a, b, sa, sb)];
+  }
+  addLog(
+    "Round complete",
+    `Round ${S.playoffs.currentRound - 1} finished. Round ${S.playoffs.currentRound} begins.`,
+  );
+}
+function nextUserPlayoffGame() {
+  if (!S.playoffs || !S.playoffs.active) return null;
+  const cur = S.playoffs.rounds[S.playoffs.currentRound - 1];
+  const userSeries = cur.series.find(
+    (s) => !s.winner && (s.top === S.team.abbr || s.bot === S.team.abbr),
+  );
+  if (!userSeries) return null;
+  return userSeries.games.find((g) => !g.played) || null;
+}
+function simNextPlayoffGame() {
+  if (!S.playoffs || !S.playoffs.active || S.playoffs.complete) return;
+  const cur = S.playoffs.rounds[S.playoffs.currentRound - 1];
+  const userGame = nextUserPlayoffGame();
+  if (userGame) {
+    // Auto-sim all other series' next unplayed games first
+    cur.series.forEach((s) => {
+      if (s.winner) return;
+      if (s.top === S.team.abbr || s.bot === S.team.abbr) return;
+      const g = s.games.find((x) => !x.played);
+      if (g) simulateGame(g);
+    });
+    if (S.playoffs.complete) {
+      tab = "schedule";
+      save();
+      return render();
+    }
+    S.gameDay = { gameId: userGame.id, source: "playoff" };
+    tab = "schedule";
+    save();
+    return render();
+  }
+  // User has no series in this round (eliminated or bye) — sim one game per series.
+  cur.series.forEach((s) => {
+    if (s.winner) return;
+    const g = s.games.find((x) => !x.played);
+    if (g) simulateGame(g);
+  });
+  save();
+  render();
+}
+function simPlayoffsToEnd() {
+  let safety = 200;
+  while (S.playoffs && !S.playoffs.complete && safety-- > 0) {
+    const cur = S.playoffs.rounds[S.playoffs.currentRound - 1];
+    if (!cur) break;
+    cur.series.forEach((s) => {
+      if (s.winner) return;
+      const g = s.games.find((x) => !x.played);
+      if (g) simulateGame(g);
+    });
+  }
+  save();
+  render();
+}
+function playoffsView() {
+  if (!S.playoffs) return `<div class="empty">No playoffs in progress.</div>`;
+  const cur = S.playoffs.rounds[S.playoffs.currentRound - 1];
+  const userGame = nextUserPlayoffGame();
+  const userSeries = cur
+    ? cur.series.find((s) => s.top === S.team.abbr || s.bot === S.team.abbr)
+    : null;
+  const userEliminated =
+    userSeries && userSeries.winner && userSeries.winner !== S.team.abbr;
+  const heroBlock = S.playoffs.complete
+    ? `<section class="card"><div class="cardPad" style="text-align:center;padding:32px"><div class="mini" style="text-transform:uppercase;letter-spacing:.12em;color:var(--muted);font-weight:800">Champion · ${S.year}</div><h1 style="font-size:48px;margin:10px 0;letter-spacing:-.05em">${teamMeta(S.playoffs.champion).name}</h1><div class="actions" style="justify-content:center;margin-top:18px"><button class="btn" data-action="openAwards" style="font-size:15px;padding:14px 20px">View Season Awards →</button></div></div></section>`
+    : userGame
+      ? `<section class="card"><div class="sectionTitle"><h3>Your Next Playoff Game · Round ${S.playoffs.currentRound}</h3><span>Game ${userGame.gameNum} of ${userSeries.bestOf}</span></div><div class="cardPad"><div class="layout2"><div><b>${userGame.home === S.team.abbr ? "Home" : "Away"} vs ${teamMeta(userGame.home === S.team.abbr ? userGame.away : userGame.home).name}</b><p class="muted">Series: ${userSeries.topWins}-${userSeries.botWins} (${userSeries.top === S.team.abbr ? "you" : teamMeta(userSeries.top).name} lead)</p></div><div class="actions" style="justify-content:flex-end;align-items:flex-end"><button class="btn" data-action="simNextPlayoffGame" style="font-size:15px;padding:14px 18px">Game Day →</button></div></div></div></section>`
+      : userEliminated
+        ? `<section class="card"><div class="cardPad"><b>You were eliminated.</b><p class="muted">Watch the rest of the bracket play out, then collect your season awards.</p><div class="actions"><button class="btn" data-action="simNextPlayoffGame">Sim Next Round Games</button><button class="btn secondary" data-action="simPlayoffsToEnd">Sim to Finals</button></div></div></section>`
+        : `<section class="card"><div class="cardPad"><b>Round ${S.playoffs.currentRound} in progress.</b><div class="actions"><button class="btn" data-action="simNextPlayoffGame">Sim Next Round Games</button><button class="btn secondary" data-action="simPlayoffsToEnd">Sim to Finals</button></div></div></section>`;
+  const bracketCards = S.playoffs.rounds
+    .map((round, ri) => {
+      const roundLabel =
+        ri === 0
+          ? "Round 1 (Best of 3)"
+          : ri === 1
+            ? "Conference Semis (Best of 5)"
+            : "Finals (Best of 7)";
+      const seriesHtml = round.series.length
+        ? round.series.map(seriesCard).join("")
+        : `<div class="empty">Pending Round ${ri} winners.</div>`;
+      return `<section class="card" style="margin-bottom:14px"><div class="sectionTitle"><h3>${roundLabel}</h3><span>${round.series.filter((s) => s.winner).length}/${round.series.length} series final</span></div><div class="cardPad log">${seriesHtml}</div></section>`;
+    })
+    .join("");
+  return `${seasonKpis()}${heroBlock}${bracketCards}`;
+}
+function seriesCard(s) {
+  const top = teamMeta(s.top);
+  const bot = teamMeta(s.bot);
+  const winsNeeded = Math.ceil(s.bestOf / 2);
+  const isUser = s.top === S.team.abbr || s.bot === S.team.abbr;
+  const winLine = s.winner
+    ? `<span class="pill good">${teamMeta(s.winner).name} win ${s.topWins}-${s.botWins}</span>`
+    : `<span class="pill">${s.topWins}-${s.botWins}</span>`;
+  const gameLines = s.games
+    .map((g) => {
+      if (!g.played)
+        return `<div class="mini">G${g.gameNum}: ${teamMeta(g.away).id} @ ${teamMeta(g.home).id} — upcoming</div>`;
+      return `<div class="mini">G${g.gameNum}: ${teamMeta(g.away).id} ${g.awayScore} @ ${teamMeta(g.home).id} ${g.homeScore} · ${teamMeta(g.winner).id} win</div>`;
+    })
+    .join("");
+  return `<div class="logItem" style="${isUser ? "border-color:var(--orange);box-shadow:inset 4px 0 0 var(--orange)" : ""}"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px"><b>(${s.topSeed}) <span class="teamBadge" style="background:${top.primary}">${s.top}</span> ${top.name} vs (${s.botSeed}) <span class="teamBadge" style="background:${bot.primary}">${s.bot}</span> ${bot.name}</b>${winLine}</div><div style="margin-top:8px">${gameLines}</div></div>`;
+}
+
+// =================== AWARDS =====================
+function computeAwards() {
+  const allPlayers = [
+    ...S.roster.map((p) => ({ p, teamId: S.team.abbr })),
+    ...S.teams.flatMap((t) => t.players.map((pl) => ({ p: pl, teamId: t.id }))),
+  ];
+  const withStats = allPlayers.filter(
+    (x) => x.p.seasonStats && x.p.seasonStats.gp > 0,
+  );
+  if (!withStats.length) return null;
+  const score = (x) => {
+    const s = x.p.seasonStats;
+    const gp = Math.max(1, s.gp);
+    return (
+      (s.pts / gp) * 1.0 +
+      (s.reb / gp) * 0.55 +
+      (s.ast / gp) * 0.7 +
+      (s.w / gp) * 8
+    );
+  };
+  const ordered = withStats.slice().sort((a, b) => score(b) - score(a));
+  const mvp = ordered[0];
+  const dpoy = withStats
+    .filter((x) => x.p.seasonStats.gp >= 8)
+    .slice()
+    .sort((a, b) => b.p.ratings.defense - a.p.ratings.defense)[0];
+  const rookies = withStats.filter((x) => x.p.rookieYear === S.year);
+  const roy = rookies.length
+    ? rookies.slice().sort((a, b) => score(b) - score(a))[0]
+    : null;
+  const mipPool = withStats.filter(
+    (x) => x.p.compositeAtStart != null && x.p.compositeAtStart > 0,
+  );
+  const mip = mipPool.length
+    ? mipPool
+        .slice()
+        .sort(
+          (a, b) =>
+            composite(b.p) -
+            b.p.compositeAtStart -
+            (composite(a.p) - a.p.compositeAtStart),
+        )[0]
+    : null;
+  const allLeague = ordered.slice(0, 5);
+  return {
+    year: S.year,
+    champion: S.playoffs ? S.playoffs.champion : null,
+    mvp,
+    dpoy,
+    roy,
+    mip,
+    allLeague,
+  };
+}
+function awardsView() {
+  const a = S.pendingAwards;
+  if (!a)
+    return `<div class="empty">No awards pending. <button class="btn secondary" data-action="closeAwards">Back</button></div>`;
+  const row = (label, x, extra) => {
+    if (!x) return "";
+    const team = x.teamId;
+    const s = x.p.seasonStats;
+    const gp = Math.max(1, s.gp);
+    return `<div class="logItem" style="display:flex;gap:14px;align-items:center">${portraitHtml(x.p)}<div style="flex:1"><div class="mini" style="text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:800">${label}</div><div style="font-size:18px;font-weight:900">${x.p.name}</div><div class="mini">${team} · ${(s.pts / gp).toFixed(1)} pts · ${(s.reb / gp).toFixed(1)} reb · ${(s.ast / gp).toFixed(1)} ast${extra ? " · " + extra : ""}</div></div></div>`;
+  };
+  const mipExtra = a.mip
+    ? `+${composite(a.mip.p) - a.mip.p.compositeAtStart} composite`
+    : null;
+  const allLeagueHtml = a.allLeague
+    .map((x, i) => {
+      const s = x.p.seasonStats;
+      const gp = Math.max(1, s.gp);
+      return `<div class="checkRow">${portraitHtml(x.p, "sm")}<div><b>${i + 1}. ${x.p.name}</b> <span class="pill">${x.p.pos}</span><div class="mini">${x.teamId} · ${(s.pts / gp).toFixed(1)} / ${(s.reb / gp).toFixed(1)} / ${(s.ast / gp).toFixed(1)}</div></div></div>`;
+    })
+    .join("");
+  return `<section class="card"><div class="sectionTitle"><h3>${a.year} Season Awards</h3>${a.champion ? `<span class="pill good">${teamMeta(a.champion).id} Champions</span>` : ""}</div><div class="cardPad"><div class="layout2"><div>${row("Most Valuable Player", a.mvp)}${row("Defensive Player of the Year", a.dpoy, "def " + (a.dpoy ? a.dpoy.p.ratings.defense : ""))}</div><div>${row("Rookie of the Year", a.roy)}${row("Most Improved", a.mip, mipExtra)}</div></div><h3 style="margin-top:18px">All-League Team</h3><div class="log">${allLeagueHtml}</div><div class="actions" style="margin-top:18px"><button class="btn" data-action="acceptAwards">Continue to Offseason →</button></div></div></section>`;
+}
+function openAwards() {
+  if (!S.pendingAwards) S.pendingAwards = computeAwards();
+  tab = "awards";
+  save();
+  render();
+}
+function acceptAwards() {
+  if (S.pendingAwards) {
+    S.awards.push(S.pendingAwards);
+    S.pendingAwards = null;
+  }
+  S.playoffs = null;
+  tab = "schedule";
+  save();
+  // Jump straight into offseason flow
+  enterOffseason();
+}
+function closeAwards() {
+  tab = "schedule";
+  save();
+  render();
 }
 
 // =================== COACHING: weekly focus, scouting, fatigue, dev, press =====================
