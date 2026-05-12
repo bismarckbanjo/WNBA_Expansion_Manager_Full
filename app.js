@@ -12,13 +12,21 @@ let S = load() || migrate(freshState());
 let tab = S.started ? "dashboard" : "setup";
 let selectedCity = DATA.expansionCities[0];
 let modal = null;
-let draftFilters = { q: "", pos: "ALL", team: "ALL", risk: "ALL" };
+let draftFilters = {
+  q: "",
+  pos: "ALL",
+  team: "ALL",
+  risk: "ALL",
+  strength: "",
+  arch: "ALL",
+};
 let trade = {
   team: "ATL",
   userGive: [],
   otherGive: [],
   userPick: 0,
   otherPick: 0,
+  query: "",
 };
 function freshState() {
   return {
@@ -85,13 +93,13 @@ function migrate(s) {
     };
   }
   if (s.gameDay === undefined) s.gameDay = null;
-  // Ensure fatigue on every player record
-  const ensureFatigue = (p) => {
-    if (typeof p.fatigue !== "number") p.fatigue = 0;
+  // Ensure injury field on every player record (fatigue field is left orphaned for backward compat)
+  const ensureInjury = (p) => {
+    if (p.injury === undefined) p.injury = null;
   };
-  (s.roster || []).forEach(ensureFatigue);
-  (s.waived || []).forEach(ensureFatigue);
-  (s.teams || []).forEach((t) => (t.players || []).forEach(ensureFatigue));
+  (s.roster || []).forEach(ensureInjury);
+  (s.waived || []).forEach(ensureInjury);
+  (s.teams || []).forEach((t) => (t.players || []).forEach(ensureInjury));
   return s;
 }
 function load() {
@@ -347,7 +355,13 @@ function leaguePressure() {
 }
 function draft() {
   const pool = filteredDraftPool();
-  return `${kpis()}<section class="card"><div class="sectionTitle"><h3>Available Expansion Pool</h3><span>protected stars are visible but locked unless acquired by trade</span></div><div class="filters"><input data-filter="q" placeholder="Search player/team/scouting" value="${draftFilters.q}"><select data-filter="pos"><option>ALL</option>${["G", "F", "C"].map((x) => `<option ${draftFilters.pos === x ? "selected" : ""}>${x}</option>`).join("")}</select><select data-filter="team"><option>ALL</option>${S.teams.map((t) => `<option value="${t.id}" ${draftFilters.team === t.id ? "selected" : ""}>${t.name}</option>`).join("")}</select><select data-filter="risk"><option value="ALL">All risk profiles</option><option ${draftFilters.risk === "upside" ? "selected" : ""} value="upside">Upside</option><option ${draftFilters.risk === "safe" ? "selected" : ""} value="safe">Safe veterans</option><option ${draftFilters.risk === "cheap" ? "selected" : ""} value="cheap">Cheap contracts</option></select></div><div class="board">${pool.map(playerDraftCard).join("") || '<div class="empty">No players match those filters.</div>'}</div></section>`;
+  const archOpts =
+    `<option value="ALL">All archetypes</option>` +
+    ARCHETYPE_OPTIONS.map(
+      (a) =>
+        `<option value="${a}" ${draftFilters.arch === a ? "selected" : ""}>${a}</option>`,
+    ).join("");
+  return `${kpis()}<section class="card"><div class="sectionTitle"><h3>Available Expansion Pool</h3><span>protected stars are visible but locked unless acquired by trade</span></div><div class="filters"><input data-filter="q" placeholder="Search name/team/scouting" value="${draftFilters.q}"><input data-filter="strength" placeholder="Strength contains (e.g. shooting)" value="${draftFilters.strength}"><select data-filter="pos"><option>ALL</option>${["G", "F", "C"].map((x) => `<option ${draftFilters.pos === x ? "selected" : ""}>${x}</option>`).join("")}</select><select data-filter="team"><option>ALL</option>${S.teams.map((t) => `<option value="${t.id}" ${draftFilters.team === t.id ? "selected" : ""}>${t.name}</option>`).join("")}</select><select data-filter="arch">${archOpts}</select><select data-filter="risk"><option value="ALL">All risk profiles</option><option ${draftFilters.risk === "upside" ? "selected" : ""} value="upside">Upside</option><option ${draftFilters.risk === "safe" ? "selected" : ""} value="safe">Safe veterans</option><option ${draftFilters.risk === "cheap" ? "selected" : ""} value="cheap">Cheap contracts</option></select></div><div class="board">${pool.map(playerDraftCard).join("") || '<div class="empty">No players match those filters.</div>'}</div></section>`;
 }
 function filteredDraftPool() {
   return allLeaguePlayers()
@@ -369,6 +383,10 @@ function filteredDraftPool() {
       if (draftFilters.risk === "safe" && !(p.years <= 1 && p.ratings.iq > 78))
         return false;
       if (draftFilters.risk === "cheap" && p.salary > 500000) return false;
+      const s = draftFilters.strength.toLowerCase();
+      if (s && !(p.strengths || "").toLowerCase().includes(s)) return false;
+      if (draftFilters.arch !== "ALL" && p.archetype !== draftFilters.arch)
+        return false;
       return true;
     })
     .sort((a, b) => a.protected - b.protected || tradeValue(b) - tradeValue(a));
@@ -406,7 +424,16 @@ function recommendation() {
 function trades() {
   const other = S.teams.find((t) => t.id === trade.team) || S.teams[0];
   const evaln = evaluateTrade(other);
-  return `${kpis()}<section class="card"><div class="sectionTitle"><h3>Trade Machine</h3><span>salary, value, team need, protected-player logic</span></div><div class="cardPad"><div class="field"><label>Trade partner</label><select data-trade-team>${S.teams.map((t) => `<option value="${t.id}" ${trade.team === t.id ? "selected" : ""}>${t.name} · ${t.status}</option>`).join("")}</select></div><div class="tradeBox"><div class="tradePanel"><div class="sectionTitle"><h3>${S.team.nickname} sends</h3><span>${shortMoney(sumSelected(S.roster, trade.userGive))}</span></div><div class="tradeList">${S.roster.map((p) => checkRow(p, "userGive")).join("") || '<div class="empty">No roster players to trade.</div>'}</div><div class="cardPad"><label><input type="checkbox" data-pick="user" ${trade.userPick ? "checked" : ""}> Include your future 1st-round pick</label></div></div><div class="tradePanel"><div class="sectionTitle"><h3>${other.name} sends</h3><span>${shortMoney(sumSelected(other.players, trade.otherGive))}</span></div><div class="tradeList">${other.players.map((p) => checkRow(p, "otherGive")).join("")}</div><div class="cardPad"><label><input type="checkbox" data-pick="other" ${trade.otherPick ? "checked" : ""}> Request their future 2nd-round pick</label></div></div></div><div class="layout2" style="margin-top:18px"><div class="logItem"><b>Trade Verdict: <span class="pill ${evaln.ok ? "good" : "warn"}">${evaln.label}</span></b><p class="muted">${evaln.reason}</p><div class="meter"><span>Your outgoing value</span><div class="bar"><i style="width:${Math.min(100, evaln.userValue / 20)}%"></i></div><b>${evaln.userValue}</b></div><div class="meter"><span>Partner outgoing value</span><div class="bar"><i style="width:${Math.min(100, evaln.otherValue / 20)}%"></i></div><b>${evaln.otherValue}</b></div></div><div class="actions"><button class="btn" data-action="submitTrade" ${evaln.ok ? "" : "disabled"}>Submit Trade</button><button class="btn secondary" data-action="clearTrade">Clear Selections</button></div></div></div></section>`;
+  const q = (trade.query || "").toLowerCase();
+  const matches = (p) =>
+    !q ||
+    (p.name || "").toLowerCase().includes(q) ||
+    (p.strengths || "").toLowerCase().includes(q) ||
+    (p.archetype || "").toLowerCase().includes(q) ||
+    (p.pos || "").toLowerCase().includes(q);
+  const userList = S.roster.filter(matches);
+  const otherList = other.players.filter(matches);
+  return `${kpis()}<section class="card"><div class="sectionTitle"><h3>Trade Machine</h3><span>salary, value, team need, protected-player logic</span></div><div class="cardPad"><div class="layout2"><div class="field"><label>Trade partner</label><select data-trade-team>${S.teams.map((t) => `<option value="${t.id}" ${trade.team === t.id ? "selected" : ""}>${t.name} · ${t.status}</option>`).join("")}</select></div><div class="field"><label>Filter players (name, strength, archetype, position)</label><input data-trade-query placeholder="e.g. shooting" value="${trade.query || ""}"></div></div><div class="tradeBox"><div class="tradePanel"><div class="sectionTitle"><h3>${S.team.nickname} sends</h3><span>${shortMoney(sumSelected(S.roster, trade.userGive))}</span></div><div class="tradeList">${userList.map((p) => checkRow(p, "userGive")).join("") || '<div class="empty">No roster players match.</div>'}</div><div class="cardPad"><label><input type="checkbox" data-pick="user" ${trade.userPick ? "checked" : ""}> Include your future 1st-round pick</label></div></div><div class="tradePanel"><div class="sectionTitle"><h3>${other.name} sends</h3><span>${shortMoney(sumSelected(other.players, trade.otherGive))}</span></div><div class="tradeList">${otherList.map((p) => checkRow(p, "otherGive")).join("") || '<div class="empty">No partner players match.</div>'}</div><div class="cardPad"><label><input type="checkbox" data-pick="other" ${trade.otherPick ? "checked" : ""}> Request their future 2nd-round pick</label></div></div></div><div class="layout2" style="margin-top:18px"><div class="logItem"><b>Trade Verdict: <span class="pill ${evaln.ok ? "good" : "warn"}">${evaln.label}</span></b><p class="muted">${evaln.reason}</p><div class="meter"><span>Your outgoing value</span><div class="bar"><i style="width:${Math.min(100, evaln.userValue / 20)}%"></i></div><b>${evaln.userValue}</b></div><div class="meter"><span>Partner outgoing value</span><div class="bar"><i style="width:${Math.min(100, evaln.otherValue / 20)}%"></i></div><b>${evaln.otherValue}</b></div></div><div class="actions"><button class="btn" data-action="submitTrade" ${evaln.ok ? "" : "disabled"}>Submit Trade</button><button class="btn secondary" data-action="clearTrade">Clear Selections</button></div></div></div></section>`;
 }
 function checkRow(p, side) {
   const checked = trade[side].includes(p.id);
@@ -697,8 +724,10 @@ function generateSchedule() {
 }
 function teamPower(id) {
   const meta = teamMeta(id);
+  // Injured players are unavailable and don't contribute to the lineup.
   const players = meta.players
     .slice()
+    .filter((p) => !p.injury)
     .sort((a, b) => composite(b) - composite(a));
   if (!players.length)
     return {
@@ -719,12 +748,8 @@ function teamPower(id) {
   const W = [2.0, 1.5, 1.2, 1.0, 0.8, 0.5, 0.4, 0.3];
   const w = top.map((_, i) => W[i] ?? 0.3);
   const wSum = w.reduce((a, b) => a + b, 0);
-  // Fatigue multiplier: 0 fatigue = 1.0x, 100 fatigue = 0.5x output.
-  const fmult = (p) => 1 - (p.fatigue || 0) / 200;
   const wavg = (k) =>
-    Math.round(
-      top.reduce((s, p, i) => s + p.ratings[k] * w[i] * fmult(p), 0) / wSum,
-    );
+    Math.round(top.reduce((s, p, i) => s + p.ratings[k] * w[i], 0) / wSum);
   // Position-aware defensive share: guards defend the perimeter, bigs the paint.
   const defShare = (p) => {
     if (p.pos.includes("G")) return { per: 0.75, int: 0.25 };
@@ -733,7 +758,7 @@ function teamPower(id) {
   };
   const posWeighted = (k, side) => {
     const num = top.reduce(
-      (s, p, i) => s + p.ratings[k] * w[i] * defShare(p)[side] * fmult(p),
+      (s, p, i) => s + p.ratings[k] * w[i] * defShare(p)[side],
       0,
     );
     const den = top.reduce((s, p, i) => s + w[i] * defShare(p)[side], 0);
@@ -898,18 +923,7 @@ function topPerformers(id, ptsFor) {
 function simulateGame(g) {
   if (!g || g.played) return;
   const r = simScore(g.home, g.away, g);
-  // Fatigue accumulates for top-8 rotation on both teams.
-  const wear = (id) => {
-    const players = teamMeta(id)
-      .players.slice()
-      .sort((a, b) => composite(b) - composite(a))
-      .slice(0, 8);
-    players.forEach((p) => {
-      p.fatigue = Math.min(100, (p.fatigue || 0) + rand(5, 10));
-    });
-  };
-  wear(g.home);
-  wear(g.away);
+  rollInjuries(g);
   Object.assign(g, {
     played: true,
     homeScore: r.hs,
@@ -948,9 +962,10 @@ function simulateGame(g) {
     `${teamMeta(g.away).name} ${g.awayScore}, ${teamMeta(g.home).name} ${g.homeScore}. ${teamMeta(g.winner).name} win.`,
   );
   if (g.home === S.team.abbr || g.away === S.team.abbr) {
-    // Each user game advances the calendar: practice effects, dev growth, market churn, press.
+    // Each user game advances the calendar: dev growth, market churn, injury healing, press.
     applyWeeklyTransition();
     marketChurn();
+    tickAllInjuries();
     maybeTriggerPress(g);
   }
   // Keep S.week in sync with the schedule.
@@ -1127,20 +1142,15 @@ function gameDayView() {
     .slice()
     .sort((a, b) => composite(b) - composite(a))
     .slice(0, 8);
-  const fatigueAvg = topRotation.length
-    ? Math.round(
-        topRotation.reduce((s, p) => s + (p.fatigue || 0), 0) /
-          topRotation.length,
-      )
-    : 0;
+  const injuredCount = S.roster.filter((p) => p.injury).length;
   const oppFocus = oppPower.intO > oppPower.perO ? "interior" : "perimeter";
   const recommendedPlan = oppPower.intO > oppPower.perO ? "pack" : "extend";
   const scoutBlock = gp.scouted
     ? `<div class="impact" style="margin-top:10px"><div class="impactRow"><span>Per O</span><div class="bar"><i style="width:${oppPower.perO}%"></i></div><b>${oppPower.perO}</b></div><div class="impactRow"><span>Per D</span><div class="bar"><i style="width:${oppPower.perD}%"></i></div><b>${oppPower.perD}</b></div><div class="impactRow"><span>Int O</span><div class="bar"><i style="width:${oppPower.intO}%"></i></div><b>${oppPower.intO}</b></div><div class="impactRow"><span>Int D</span><div class="bar"><i style="width:${oppPower.intD}%"></i></div><b>${oppPower.intD}</b></div></div><p class="muted" style="margin-top:8px">Opponent leans <b>${oppFocus}</b>. Scouts recommend <b>${recommendedPlan === "pack" ? "Pack the Paint" : "Extend Defense"}</b>.</p>`
     : `<div style="margin-top:10px"><button class="btn" data-scout="${g.id}">Scout Opponent</button><p class="muted" style="margin-top:8px">Skipping the scout means flying blind. You can still set a plan, but you won't know which lane to defend.</p></div>`;
   const planBlock = `<div class="actions" style="margin-top:10px"><button class="btn ${gp.plan === "pack" ? "" : "secondary"}" data-plan="${g.id}|pack">Pack the Paint</button><button class="btn ${gp.plan === "extend" ? "" : "secondary"}" data-plan="${g.id}|extend">Extend Defense</button>${gp.plan ? `<button class="btn ghost" data-plan="${g.id}|none">Clear</button>` : ""}</div>`;
-  const rotationTable = `<table class="table"><thead><tr><th>Player</th><th>Pos</th><th>Fatigue</th><th>Mood</th></tr></thead><tbody>${topRotation.map((p) => `<tr><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div class="playerName">${p.name}</div></div></td><td>${p.pos}</td><td>${fatigueBadge(p)}</td><td>${p.mood || 60}</td></tr>`).join("")}</tbody></table>`;
-  return `<section class="card"><div class="sectionTitle"><h3>Game Day · Week ${g.week} · ${isHome ? "vs" : "at"} ${opp.name}</h3><span>${opp.id} ${oppRec.w}-${oppRec.l}</span></div><div class="cardPad"><div class="layout2"><section><h3 style="margin-top:0">Opponent</h3><p class="muted">${opp.name} · ${oppRec.w}-${oppRec.l} · power index ${oppPower.overall}</p>${scoutBlock}<h3 style="margin-top:18px">Your Game Plan</h3>${planBlock}</section><section><h3 style="margin-top:0">Your Prep</h3><p class="muted">Weekly Focus: <b>${currentFocusLabel()}</b></p><p class="muted">Plan: <b>${gp.plan === "pack" ? "Pack the Paint" : gp.plan === "extend" ? "Extend Defense" : "Not set"}</b></p><p class="muted">Power Index: <b>${myPower.overall}</b> · Per ${myPower.perO}/${myPower.perD} · Int ${myPower.intO}/${myPower.intD}</p><p class="muted">Top-8 avg fatigue: <b>${fatigueAvg}</b></p></section></div><h3 style="margin-top:18px">Top-8 Rotation</h3>${rotationTable}<div class="actions" style="margin-top:18px"><button class="btn" data-action="playQueuedGame" style="font-size:15px;padding:14px 20px">Play Game →</button><button class="btn secondary" data-action="closeGameDay">Hold Off</button></div></div></section>`;
+  const rotationTable = `<table class="table"><thead><tr><th>Player</th><th>Pos</th><th>Status</th><th>Mood</th></tr></thead><tbody>${topRotation.map((p) => `<tr style="${p.injury ? "opacity:.5" : ""}"><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div class="playerName">${p.name}</div></div></td><td>${p.pos}</td><td>${injuryBadge(p)}</td><td>${p.mood || 60}</td></tr>`).join("")}</tbody></table>`;
+  return `<section class="card"><div class="sectionTitle"><h3>Game Day · Week ${g.week} · ${isHome ? "vs" : "at"} ${opp.name}</h3><span>${opp.id} ${oppRec.w}-${oppRec.l}</span></div><div class="cardPad"><div class="layout2"><section><h3 style="margin-top:0">Opponent</h3><p class="muted">${opp.name} · ${oppRec.w}-${oppRec.l} · power index ${oppPower.overall}</p>${scoutBlock}<h3 style="margin-top:18px">Your Game Plan</h3>${planBlock}</section><section><h3 style="margin-top:0">Your Prep</h3><p class="muted">Weekly Focus: <b>${currentFocusLabel()}</b></p><p class="muted">Plan: <b>${gp.plan === "pack" ? "Pack the Paint" : gp.plan === "extend" ? "Extend Defense" : "Not set"}</b></p><p class="muted">Power Index: <b>${myPower.overall}</b> · Per ${myPower.perO}/${myPower.perD} · Int ${myPower.intO}/${myPower.intD}</p><p class="muted">Injured players: <b>${injuredCount}</b></p></section></div><h3 style="margin-top:18px">Top-8 Rotation</h3>${rotationTable}<div class="actions" style="margin-top:18px"><button class="btn" data-action="playQueuedGame" style="font-size:15px;padding:14px 20px">Play Game →</button><button class="btn secondary" data-action="closeGameDay">Hold Off</button></div></div></section>`;
 }
 function seasonKpis() {
   const r = seasonRecord(S.team.abbr);
@@ -1322,6 +1332,12 @@ function bind() {
       trade.team = tt.value;
       trade.userGive = [];
       trade.otherGive = [];
+      render();
+    };
+  const tq = document.querySelector("[data-trade-query]");
+  if (tq)
+    tq.oninput = () => {
+      trade.query = tq.value;
       render();
     };
   document.querySelectorAll("[data-trade-side]").forEach(
@@ -1733,7 +1749,7 @@ function generateRookieClass(year) {
         ratings,
         archetype: t.arch,
         mood: 60 + Math.floor(Math.random() * 25),
-        fatigue: 0,
+        injury: null,
       });
     }
   }
@@ -2040,22 +2056,10 @@ const FOCUS_OPTIONS = [
     icon: "◆",
   },
   {
-    id: "conditioning",
-    label: "Conditioning",
-    desc: "Sweat hard. Extra -4 fatigue recovery this week (no rating boost).",
-    icon: "↻",
-  },
-  {
     id: "film",
     label: "Film Study",
     desc: "Watch tape. +1 to all four channels this week.",
     icon: "▶",
-  },
-  {
-    id: "rest",
-    label: "Rest Day",
-    desc: "Step back. -8 fatigue recovery this week. No training stimulus.",
-    icon: "z",
   },
 ];
 function setWeeklyFocus(id) {
@@ -2093,22 +2097,7 @@ function userUpcomingGames(n) {
     .slice(0, n || 3);
 }
 function applyWeeklyTransition() {
-  // Natural recovery for all players (top-8 rotation absorbed heavier load earlier).
-  const recover = (p, amt) => {
-    p.fatigue = Math.max(0, (p.fatigue || 0) - amt);
-  };
-  S.roster.forEach((p) => recover(p, 3));
-  // AI teams recover slightly more (they have their own coaching tools we abstract).
-  S.teams.forEach((t) => t.players.forEach((p) => recover(p, 5)));
-  // Practice focus side-effects on user roster.
-  const f = S.coaching.weeklyFocus;
-  if (f === "conditioning") S.roster.forEach((p) => recover(p, 4));
-  else if (f === "rest") S.roster.forEach((p) => recover(p, 8));
-  else if (f !== "none" && f !== "film")
-    S.roster.forEach((p) => {
-      p.fatigue = Math.min(100, (p.fatigue || 0) + 3);
-    });
-  // Player dev focus: +1 to chosen rating per week, capped at potential.
+  // Player dev focus: +1 to chosen rating per user game, capped at potential.
   const df = S.coaching.devFocus;
   if (df && df.playerId) {
     const target = S.roster.find((p) => p.id === df.playerId);
@@ -2124,6 +2113,62 @@ function applyWeeklyTransition() {
       }
     }
   }
+}
+function rollInjuries(g) {
+  const checkTeam = (id) => {
+    const team = teamMeta(id);
+    const top = team.players
+      .slice()
+      .filter((p) => !p.injury)
+      .sort((a, b) => composite(b) - composite(a))
+      .slice(0, 8);
+    top.forEach((p) => {
+      if (Math.random() < 0.022) {
+        const r = Math.random();
+        let games, severity;
+        if (r < 0.6) {
+          games = rand(1, 2);
+          severity = "minor";
+        } else if (r < 0.9) {
+          games = rand(3, 5);
+          severity = "moderate";
+        } else {
+          games = rand(6, 15);
+          severity = "severe";
+        }
+        p.injury = { games, severity };
+        if (id === S.team.abbr) {
+          addLog(
+            "Injury report",
+            `${p.name} suffered a ${severity} injury — out approx ${games} game(s).`,
+          );
+        }
+      }
+    });
+  };
+  checkTeam(g.home);
+  checkTeam(g.away);
+}
+function tickAllInjuries() {
+  const dec = (p) => {
+    if (!p.injury) return;
+    p.injury.games -= 1;
+    if (p.injury.games <= 0) {
+      const wasUser = p.team === S.team.abbr;
+      const name = p.name;
+      p.injury = null;
+      if (wasUser)
+        addLog("Return from injury", `${name} cleared and back in rotation.`);
+    }
+  };
+  S.roster.forEach(dec);
+  S.teams.forEach((t) => t.players.forEach(dec));
+}
+function injuryBadge(p) {
+  if (!p.injury) return `<span class="pill good">healthy</span>`;
+  const sev = p.injury.severity;
+  const cls = sev === "severe" ? "bad" : sev === "moderate" ? "warn" : "";
+  return `<span class="pill ${cls}">Out ${p.injury.games} (${sev})</span>`;
 }
 function maybeTriggerPress(g) {
   if (!S.coaching || S.coaching.pendingPress) return;
@@ -2152,7 +2197,7 @@ function maybeTriggerPress(g) {
       body: "The press wants accountability. Choose your tone.",
       options: [
         { id: "responsible", text: "Take full responsibility yourself." },
-        { id: "schedule", text: "Point to fatigue and the schedule." },
+        { id: "schedule", text: "Point to the schedule and travel." },
         { id: "honest", text: "Be honest — execution wasn't there." },
       ],
     };
@@ -2181,11 +2226,10 @@ function respondToPress(optId) {
       .forEach((r) => (r.mood = clampMood((r.mood || 60) + 3)));
   else if (optId === "responsible") {
     /* mood damage already absorbed by loss; coach takes hit silently */
-  } else if (optId === "schedule")
-    S.roster.forEach((r) => {
-      r.fatigue = Math.max(0, (r.fatigue || 0) - 4);
-    });
-  else if (optId === "honest")
+  } else if (optId === "schedule") {
+    /* deflect to schedule — mild mood neutralizer */
+    S.roster.forEach((r) => (r.mood = clampMood((r.mood || 60) + 1)));
+  } else if (optId === "honest")
     S.roster.forEach((r) => (r.mood = clampMood((r.mood || 60) - 1)));
   S.coaching.pressLog.unshift({
     when: `Week ${S.week}`,
@@ -2197,13 +2241,8 @@ function respondToPress(optId) {
   save();
   render();
 }
-function fatigueBadge(p) {
-  const f = p.fatigue || 0;
-  const cls = f >= 80 ? "bad" : f >= 60 ? "warn" : f >= 35 ? "" : "good";
-  return `<span class="pill ${cls}">${f}</span>`;
-}
 function coachingView() {
-  return `${kpis()}<div class="layout2"><div>${weeklyFocusSection()}${devFocusSection()}</div><div>${pressSection()}${fatigueSection()}</div></div><p class="muted" style="margin-top:14px;text-align:center">Pre-game scouting and game plans now live on the <b>Season</b> tab, alongside your upcoming opponents.</p>`;
+  return `${kpis()}<div class="layout2"><div>${weeklyFocusSection()}${devFocusSection()}</div><div>${pressSection()}${injurySection()}</div></div><p class="muted" style="margin-top:14px;text-align:center">Pre-game scouting and game plans now live on the <b>Season</b> tab, alongside your upcoming opponents.</p>`;
 }
 function weeklyFocusSection() {
   const cur = S.coaching.weeklyFocus;
@@ -2263,21 +2302,24 @@ function devFocusSection() {
     : "Pick a player and rating to give them focused individual work each week.";
   return `<section class="card"><div class="sectionTitle"><h3>Player Development</h3><span>+1 rating per week</span></div><div class="cardPad"><div class="field"><label>Player</label><select id="dev-player">${playerOpts}</select></div><div class="field"><label>Skill emphasis</label><select id="dev-rating">${ratingOpts}</select></div><div class="actions"><button class="btn" data-action="commitDevFocus">Set Development</button></div><p class="muted" style="margin-top:10px">${note}</p></div></section>`;
 }
-function fatigueSection() {
+function injurySection() {
   if (!S.roster.length)
-    return `<section class="card"><div class="sectionTitle"><h3>Roster Fatigue</h3></div><div class="cardPad"><div class="empty">Draft a roster first.</div></div></section>`;
+    return `<section class="card"><div class="sectionTitle"><h3>Injury Report</h3></div><div class="cardPad"><div class="empty">Draft a roster first.</div></div></section>`;
+  const injured = S.roster.filter((p) => p.injury);
+  const healthy = S.roster.length - injured.length;
   const rows = S.roster
     .slice()
-    .sort((a, b) => (b.fatigue || 0) - (a.fatigue || 0))
+    .sort((a, b) => {
+      const ai = a.injury ? a.injury.games : -1;
+      const bi = b.injury ? b.injury.games : -1;
+      return bi - ai;
+    })
     .map(
       (p) =>
-        `<tr><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div><div class="playerName">${p.name}</div><div class="mini">${p.pos} · ${visibleGrade(p)}</div></div></div></td><td>${fatigueBadge(p)}</td><td>${p.mood || 60}</td></tr>`,
+        `<tr><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div><div class="playerName">${p.name}</div><div class="mini">${p.pos} · ${visibleGrade(p)}</div></div></div></td><td>${injuryBadge(p)}</td><td>${p.mood || 60}</td></tr>`,
     )
     .join("");
-  const avgF = Math.round(
-    S.roster.reduce((s, p) => s + (p.fatigue || 0), 0) / S.roster.length,
-  );
-  return `<section class="card"><div class="sectionTitle"><h3>Roster Fatigue</h3><span>team avg ${avgF}</span></div><table class="table"><thead><tr><th>Player</th><th>Fatigue</th><th>Mood</th></tr></thead><tbody>${rows}</tbody></table></section>`;
+  return `<section class="card"><div class="sectionTitle"><h3>Injury Report</h3><span>${healthy} healthy · ${injured.length} out</span></div><table class="table"><thead><tr><th>Player</th><th>Status</th><th>Mood</th></tr></thead><tbody>${rows}</tbody></table></section>`;
 }
 function pressSection() {
   const pending = S.coaching.pendingPress;
@@ -2388,7 +2430,7 @@ function addCustomRookie() {
     ratings,
     archetype,
     mood: 65,
-    fatigue: 0,
+    injury: null,
   });
   save();
   toast(`${name} added to ${year} draft class.`);
