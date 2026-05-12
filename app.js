@@ -1544,10 +1544,14 @@ function enterOffseason() {
     return toast("Finish all games before advancing to the offseason.");
   }
   const reports = applyOffseasonAging();
-  const rookieClass =
+  const upcomingYear = S.year + 1;
+  const base =
     S.year === 2026
       ? clone(DATA.rookieClass2027)
-      : generateRookieClass(S.year + 1);
+      : generateRookieClass(upcomingYear);
+  const extras =
+    (DATA.rookieClassExtras && DATA.rookieClassExtras[upcomingYear]) || [];
+  const rookieClass = base.concat(clone(extras));
   const draftOrder = standingsRows()
     .slice()
     .reverse()

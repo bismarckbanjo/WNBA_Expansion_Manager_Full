@@ -350,6 +350,19 @@ window.GAME_DATA = {
       "prospect",
     ),
   ],
+  // Add named players to specific future rookie classes here.
+  // They'll be appended to that year's class (auto-generated names for empty years).
+  // Each entry is a year-keyed array of p(...) calls — same 18-arg signature as teams.
+  // Example:
+  //   2028: [
+  //     p("Real Person Name", "G", "UConn", 480000, 4,
+  //       "Scouting one-liner.", "Strength tags", "Concern tags",
+  //       false, 80, 76, 78, 70, 50, 80, 82, 90, "starter"),
+  //   ],
+  rookieClassExtras: {
+    // 2028: [],
+    // 2029: [],
+  },
   draftProspects: [
     p(
       "Dani Carnegie",
