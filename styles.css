@@ -578,6 +578,56 @@ button {
   text-align: center;
   color: var(--muted);
 }
+.portrait {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #2a201b, #4a352a);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  position: relative;
+  overflow: hidden;
+  flex-shrink: 0;
+  border: 2px solid rgba(255, 255, 255, 0.6);
+  box-shadow: 0 4px 12px rgba(49, 31, 17, 0.18);
+}
+.portrait img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center 18%;
+}
+.portrait.lg {
+  width: 84px;
+  height: 84px;
+  font-size: 24px;
+  border-width: 3px;
+}
+.portrait.sm {
+  width: 32px;
+  height: 32px;
+  font-size: 11px;
+  border-width: 1.5px;
+}
+.playerCard {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 14px;
+  align-items: center;
+}
+.playerCard > .actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-end;
+}
 .teamBadge {
   width: 34px;
   height: 34px;

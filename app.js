@@ -109,6 +109,20 @@ function visibleGrade(p) {
   if (c >= 62) return "Depth";
   return "Fringe";
 }
+function portraitHtml(player, size) {
+  const id = DATA.playerPhotos && DATA.playerPhotos[player.name];
+  const initials = player.name
+    .split(/\s+/)
+    .map((s) => s[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+  const cls = "portrait" + (size ? " " + size : "");
+  const img = id
+    ? `<img src="https://a.espncdn.com/i/headshots/wnba/players/full/${id}.png" alt="${player.name}" onerror="this.style.display='none'" loading="lazy">`
+    : "";
+  return `<div class="${cls}">${initials}${img}</div>`;
+}
 function tradeValue(p) {
   const r = p.ratings;
   return Math.round(
@@ -314,13 +328,13 @@ function playerDraftCard(p) {
     p.protected ||
     S.roster.length >= DATA.expansionPickLimit ||
     userSalary() + p.salary > DATA.cap;
-  return `<div class="playerCard"><div><div><span class="playerName">${p.name}</span> <span class="pill">${p.pos}</span> <span class="pill" style="background:${p.teamObj.primary};color:white">${p.team}</span> ${p.protected ? '<span class="pill bad">Protected</span>' : ""}</div><div class="scout">${p.scouting}</div><div class="tags"><span class="tag">${visibleGrade(p)}</span><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${p.years} yr</span><span class="tag">Strength: ${p.strengths.split(",")[0]}</span><span class="tag">Concern: ${p.weaknesses.split(",")[0]}</span></div></div><div class="actions"><button class="btn secondary" data-view="${p.id}">Scout</button><button class="btn ${disabled ? "secondary" : ""}" ${disabled ? "disabled" : ""} data-draft="${p.id}">${p.protected ? "Locked" : userSalary() + p.salary > DATA.cap ? "No Cap" : "Draft"}</button></div></div>`;
+  return `<div class="playerCard">${portraitHtml(p)}<div><div><span class="playerName">${p.name}</span> <span class="pill">${p.pos}</span> <span class="pill" style="background:${p.teamObj.primary};color:white">${p.team}</span> ${p.protected ? '<span class="pill bad">Protected</span>' : ""}</div><div class="scout">${p.scouting}</div><div class="tags"><span class="tag">${visibleGrade(p)}</span><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${p.years} yr</span><span class="tag">Strength: ${p.strengths.split(",")[0]}</span><span class="tag">Concern: ${p.weaknesses.split(",")[0]}</span></div></div><div class="actions"><button class="btn secondary" data-view="${p.id}">Scout</button><button class="btn ${disabled ? "secondary" : ""}" ${disabled ? "disabled" : ""} data-draft="${p.id}">${p.protected ? "Locked" : userSalary() + p.salary > DATA.cap ? "No Cap" : "Draft"}</button></div></div>`;
 }
 function roster() {
   return `${kpis()}<div class="layout2"><section class="card"><div class="sectionTitle"><h3>Cap Sheet</h3><span>${money(userSalary())} / ${money(DATA.cap)}</span></div>${rosterTable(S.roster)}</section><section class="card"><div class="sectionTitle"><h3>Roster Tools</h3><span>rotation control</span></div><div class="cardPad"><div class="impact">${impactBars()}</div><hr style="border:0;border-top:1px solid var(--line);margin:18px 0"><h3>Position Balance</h3>${positionBalance()}<h3>Recommended Next Move</h3><p class="muted">${recommendation()}</p></div></section></div>`;
 }
 function rosterTable(players) {
-  return `<table class="table"><thead><tr><th>Player</th><th>Pos</th><th>Role</th><th>Salary</th><th>Contract</th><th></th></tr></thead><tbody>${players.map((p) => `<tr><td><div class="playerName">${p.name}</div><div class="mini">${p.scouting.slice(0, 90)}...</div></td><td>${p.pos}</td><td><span class="pill">${visibleGrade(p)}</span></td><td>${shortMoney(p.salary)}</td><td>${p.years} yr</td><td><button class="btn secondary" data-view="${p.id}">Scout</button> ${S.roster.find((x) => x.id === p.id) ? `<button class="btn danger" data-waive="${p.id}">Waive</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="6"><div class="empty">No players yet.</div></td></tr>`}</tbody></table>`;
+  return `<table class="table"><thead><tr><th>Player</th><th>Pos</th><th>Role</th><th>Salary</th><th>Contract</th><th></th></tr></thead><tbody>${players.map((p) => `<tr><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div><div class="playerName">${p.name}</div><div class="mini">${p.scouting.slice(0, 90)}...</div></div></div></td><td>${p.pos}</td><td><span class="pill">${visibleGrade(p)}</span></td><td>${shortMoney(p.salary)}</td><td>${p.years} yr</td><td><button class="btn secondary" data-view="${p.id}">Scout</button> ${S.roster.find((x) => x.id === p.id) ? `<button class="btn danger" data-waive="${p.id}">Waive</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="6"><div class="empty">No players yet.</div></td></tr>`}</tbody></table>`;
 }
 function positionBalance() {
   return ["G", "F", "C"]
@@ -346,7 +360,7 @@ function trades() {
 }
 function checkRow(p, side) {
   const checked = trade[side].includes(p.id);
-  return `<label class="checkRow"><input type="checkbox" data-trade-side="${side}" value="${p.id}" ${checked ? "checked" : ""}><div><b>${p.name}</b> <span class="pill">${p.pos}</span> ${p.protected ? '<span class="pill bad">protected cost</span>' : ""}<div class="mini">${visibleGrade(p)} · ${shortMoney(p.salary)} · ${p.scouting.slice(0, 76)}...</div></div></label>`;
+  return `<label class="checkRow"><input type="checkbox" data-trade-side="${side}" value="${p.id}" ${checked ? "checked" : ""}>${portraitHtml(p, "sm")}<div><b>${p.name}</b> <span class="pill">${p.pos}</span> ${p.protected ? '<span class="pill bad">protected cost</span>' : ""}<div class="mini">${visibleGrade(p)} · ${shortMoney(p.salary)} · ${p.scouting.slice(0, 76)}...</div></div></label>`;
 }
 function sumSelected(players, ids) {
   return players
@@ -435,11 +449,11 @@ function waivers() {
   return `${kpis()}<div class="layout2"><section class="card"><div class="sectionTitle"><h3>Free Agents & Waivers</h3><span>cheap depth and regret board</span></div><div class="board">${waiverPool()
     .map(
       (p) =>
-        `<div class="playerCard"><div><span class="playerName">${p.name}</span> <span class="pill">${p.pos}</span><div class="scout">${p.scouting}</div><div class="tags"><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${visibleGrade(p)}</span><span class="tag">${p.strengths.split(",")[0]}</span></div></div><button class="btn" data-sign="${p.id}">${userSalary() + p.salary > DATA.cap ? "No Cap" : "Sign"}</button></div>`,
+        `<div class="playerCard">${portraitHtml(p)}<div><span class="playerName">${p.name}</span> <span class="pill">${p.pos}</span><div class="scout">${p.scouting}</div><div class="tags"><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${visibleGrade(p)}</span><span class="tag">${p.strengths.split(",")[0]}</span></div></div><button class="btn" data-sign="${p.id}">${userSalary() + p.salary > DATA.cap ? "No Cap" : "Sign"}</button></div>`,
     )
     .join(
       "",
-    )}</div></section><section class="card"><div class="sectionTitle"><h3>Your Waived Players</h3><span>${S.waived.length}</span></div><div class="board">${S.waived.map((p) => `<div class="playerCard"><div><b>${p.name}</b><div class="mini">${p.pos} · ${shortMoney(p.salary)}</div></div><button class="btn secondary" data-sign="${p.id}">Re-sign</button></div>`).join("") || '<div class="empty">No waived players yet.</div>'}</div></section></div>`;
+    )}</div></section><section class="card"><div class="sectionTitle"><h3>Your Waived Players</h3><span>${S.waived.length}</span></div><div class="board">${S.waived.map((p) => `<div class="playerCard">${portraitHtml(p, "sm")}<div><b>${p.name}</b><div class="mini">${p.pos} · ${shortMoney(p.salary)}</div></div><button class="btn secondary" data-sign="${p.id}">Re-sign</button></div>`).join("") || '<div class="empty">No waived players yet.</div>'}</div></section></div>`;
 }
 function waiverPool() {
   const base = [
@@ -941,7 +955,7 @@ function modalHtml() {
   if (modal.type === "player") {
     const p = findPlayer(modal.id);
     if (!p) return "";
-    return `<div class="modalShade"><div class="modal"><div class="modalHeader"><h3>${p.name} <span class="pill">${p.pos}</span></h3><button class="close" data-close>Close</button></div><div class="modalBody"><p>${p.scouting}</p><div class="layout2"><div><h3>Strengths</h3><p class="muted">${p.strengths}</p><h3>Weaknesses</h3><p class="muted">${p.weaknesses}</p><h3>Contract</h3><p class="muted">${shortMoney(p.salary)} · ${p.years} year(s) · ${p.protected ? "protected/core asset" : "available/negotiable"}</p></div><div><h3>Scouting Department View</h3><p class="muted">Numerical ratings are intentionally hidden in normal play. This panel reveals directional grades only.</p>${["scoring", "shooting", "playmaking", "defense", "rebounding", "athleticism", "iq", "potential"].map((k) => gradeRow(k, p.ratings[k])).join("")}</div></div></div></div></div>`;
+    return `<div class="modalShade"><div class="modal"><div class="modalHeader"><div style="display:flex;gap:14px;align-items:center">${portraitHtml(p, "lg")}<h3>${p.name} <span class="pill">${p.pos}</span></h3></div><button class="close" data-close>Close</button></div><div class="modalBody"><p>${p.scouting}</p><div class="layout2"><div><h3>Strengths</h3><p class="muted">${p.strengths}</p><h3>Weaknesses</h3><p class="muted">${p.weaknesses}</p><h3>Contract</h3><p class="muted">${shortMoney(p.salary)} · ${p.years} year(s) · ${p.protected ? "protected/core asset" : "available/negotiable"}</p></div><div><h3>Scouting Department View</h3><p class="muted">Numerical ratings are intentionally hidden in normal play. This panel reveals directional grades only.</p>${["scoring", "shooting", "playmaking", "defense", "rebounding", "athleticism", "iq", "potential"].map((k) => gradeRow(k, p.ratings[k])).join("")}</div></div></div></div></div>`;
   }
   if (modal.type === "team") {
     const t = S.teams.find((x) => x.id === modal.id);
