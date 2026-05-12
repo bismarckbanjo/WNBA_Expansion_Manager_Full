@@ -1581,6 +1581,24 @@ function modalHtml() {
     const t = S.teams.find((x) => x.id === modal.id);
     return `<div class="modalShade"><div class="modal"><div class="modalHeader"><h3>${t.name}</h3><button class="close" data-close>Close</button></div><div class="modalBody">${rosterTable(t.players)}</div></div></div>`;
   }
+  if (modal.type === "hire-coach") {
+    const role = modal.role;
+    const roleLabel =
+      role === "head"
+        ? "Head Coach"
+        : role === "assistant"
+          ? "Assistant Coach"
+          : "Player Development Coach";
+    const current = S.coaches[role];
+    const pool = faCoachPool(role);
+    const currentCard = current
+      ? `<h3 style="margin-top:0">Currently Hired</h3>${coachCard(current, role, true)}`
+      : "";
+    const poolHtml = pool.length
+      ? pool.map((c) => coachCard(c, role, false)).join("")
+      : '<div class="empty">No available coaches.</div>';
+    return `<div class="modalShade"><div class="modal" style="width:min(820px,100%)"><div class="modalHeader"><h3>Hire ${roleLabel}</h3><button class="close" data-close>Close</button></div><div class="modalBody">${currentCard}<h3 style="margin-top:18px">Free Agent Pool</h3><div class="log">${poolHtml}</div></div></div></div>`;
+  }
   return "";
 }
 function gradeRow(k, v) {
@@ -1659,6 +1677,16 @@ function bind() {
   document
     .querySelectorAll("[data-press]")
     .forEach((b) => (b.onclick = () => respondToPress(b.dataset.press)));
+  document
+    .querySelectorAll("[data-hire-open]")
+    .forEach((b) => (b.onclick = () => openHireModal(b.dataset.hireOpen)));
+  document.querySelectorAll("[data-hire-coach]").forEach(
+    (b) =>
+      (b.onclick = () => {
+        const [role, id] = b.dataset.hireCoach.split("|");
+        hireCoach(role, id);
+      }),
+  );
   document
     .querySelectorAll("[data-waive]")
     .forEach((b) => (b.onclick = () => waivePlayer(b.dataset.waive)));
@@ -2994,6 +3022,62 @@ function respondToPress(optId) {
 function coachingView() {
   return `${kpis()}${coachingStaffSection()}<div class="layout2" style="margin-top:18px"><div>${weeklyFocusSection()}${devFocusSection()}</div><div>${pressSection()}${injurySection()}</div></div><p class="muted" style="margin-top:14px;text-align:center">Pre-game scouting and game plans live on the <b>Season</b> tab.</p>`;
 }
+function faCoachPool(role) {
+  const pool = (DATA.coachCandidates && DATA.coachCandidates[role]) || [];
+  const current = S.coaches[role];
+  return pool.filter((c) => !current || c.id !== current.id);
+}
+function hireCoach(role, candidateId) {
+  const pool = (DATA.coachCandidates && DATA.coachCandidates[role]) || [];
+  const candidate = pool.find((c) => c.id === candidateId);
+  if (!candidate) return;
+  const prev = S.coaches[role] ? S.coaches[role].name : "the previous coach";
+  S.coaches[role] = JSON.parse(JSON.stringify(candidate));
+  if (role === "dev") S.coaches.devAccumulator = 0;
+  const roleLabel =
+    role === "head"
+      ? "Head Coach"
+      : role === "assistant"
+        ? "Assistant Coach"
+        : "Player Development Coach";
+  addLog(
+    "Coaching staff change",
+    `${candidate.name} replaces ${prev} as ${roleLabel}.`,
+  );
+  toast(`${candidate.name} hired.`);
+  modal = null;
+  save();
+  render();
+}
+function openHireModal(role) {
+  modal = { type: "hire-coach", role };
+  render();
+}
+function coachCard(c, role, isCurrent) {
+  const sys =
+    c.system && DATA.coachingSystems && DATA.coachingSystems[c.system];
+  const sysLine = sys
+    ? `<div class="mini" style="margin-top:4px"><b>${sys.label}</b> — ${sys.desc}</div>`
+    : "";
+  const traitChips = (c.traits || [])
+    .map((t) => {
+      const label = (DATA.coachTraitLabels && DATA.coachTraitLabels[t]) || t;
+      return `<span class="tag">${label}</span>`;
+    })
+    .join("");
+  const mults = c.devMultipliers
+    ? Object.entries(c.devMultipliers)
+        .map(
+          ([k, v]) =>
+            `<span class="tag" style="${v > 1.1 ? "background:#e8f7ef;color:#116442" : v < 0.9 ? "background:#ffe9e5;color:#9b2419" : ""}">${k} ${v.toFixed(1)}x</span>`,
+        )
+        .join("")
+    : "";
+  const action = isCurrent
+    ? `<span class="pill good">Currently hired</span>`
+    : `<button class="btn" data-hire-coach="${role}|${c.id}">Hire</button>`;
+  return `<div class="logItem"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px"><div style="flex:1"><div style="font-size:16px;font-weight:900">${c.name}</div>${sysLine}<div class="tags" style="margin-top:8px">${traitChips}</div>${mults ? `<div class="tags" style="margin-top:6px">${mults}</div>` : ""}</div><div style="flex-shrink:0">${action}</div></div></div>`;
+}
 function coachingStaffSection() {
   const c = S.coaches || {};
   const hc = c.head;
@@ -3024,7 +3108,9 @@ function coachingStaffSection() {
     c.devAccumulator > 0
       ? `<div class="mini" style="margin-top:4px">In progress: ${c.devAccumulator.toFixed(2)}/1.0 toward next rating bump</div>`
       : "";
-  return `<section class="card"><div class="sectionTitle"><h3>Coaching Staff</h3><span>your sideline brain trust</span></div><div class="cardPad"><div class="layout3"><div><div class="mini" style="text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:800">Head Coach</div><div style="font-size:18px;font-weight:900;margin-top:4px">${hc ? hc.name : "—"}</div>${sysLine}<div class="tags" style="margin-top:8px">${hc ? traitChips(hc.traits) : ""}</div>${buffLine}</div><div><div class="mini" style="text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:800">Assistant Coach</div><div style="font-size:18px;font-weight:900;margin-top:4px">${asst ? asst.name : "—"}</div><div class="tags" style="margin-top:8px">${asst ? traitChips(asst.traits) : ""}</div></div><div><div class="mini" style="text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:800">Player Development</div><div style="font-size:18px;font-weight:900;margin-top:4px">${dev ? dev.name : "—"}</div><div class="tags" style="margin-top:8px">${dev ? traitChips(dev.traits) : ""}</div><div class="tags" style="margin-top:6px">${devMults}</div>${devProgress}</div></div></div></section>`;
+  const hireBtn = (role) =>
+    `<button class="btn secondary" data-hire-open="${role}" style="margin-top:8px">Hire New</button>`;
+  return `<section class="card"><div class="sectionTitle"><h3>Coaching Staff</h3><span>your sideline brain trust</span></div><div class="cardPad"><div class="layout3"><div><div class="mini" style="text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:800">Head Coach</div><div style="font-size:18px;font-weight:900;margin-top:4px">${hc ? hc.name : "—"}</div>${sysLine}<div class="tags" style="margin-top:8px">${hc ? traitChips(hc.traits) : ""}</div>${buffLine}${hireBtn("head")}</div><div><div class="mini" style="text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:800">Assistant Coach</div><div style="font-size:18px;font-weight:900;margin-top:4px">${asst ? asst.name : "—"}</div><div class="tags" style="margin-top:8px">${asst ? traitChips(asst.traits) : ""}</div>${hireBtn("assistant")}</div><div><div class="mini" style="text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:800">Player Development</div><div style="font-size:18px;font-weight:900;margin-top:4px">${dev ? dev.name : "—"}</div><div class="tags" style="margin-top:8px">${dev ? traitChips(dev.traits) : ""}</div><div class="tags" style="margin-top:6px">${devMults}</div>${devProgress}${hireBtn("dev")}</div></div></div></section>`;
 }
 function weeklyFocusSection() {
   const cur = S.coaching.weeklyFocus;
