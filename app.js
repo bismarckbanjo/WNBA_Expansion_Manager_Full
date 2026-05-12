@@ -632,30 +632,62 @@ function generateSchedule() {
   return games.sort((a, b) => a.week - b.week || a.id.localeCompare(b.id));
 }
 function teamPower(id) {
-  const players = teamMeta(id)
-    .players.slice()
+  const meta = teamMeta(id);
+  const players = meta.players
+    .slice()
     .sort((a, b) => composite(b) - composite(a));
   if (!players.length)
-    return { overall: 55, off: 55, def: 55, reb: 55, pace: 55 };
+    return {
+      overall: 55,
+      off: 55,
+      def: 55,
+      reb: 55,
+      pace: 55,
+      perO: 55,
+      perD: 55,
+      intO: 55,
+      intD: 55,
+      depth: 0,
+    };
   const top = players.slice(0, 8);
   const w = top.map((_, i) => (i < 5 ? 1.15 : 0.72));
+  const wSum = w.reduce((a, b) => a + b, 0);
   const wavg = (k) =>
-    Math.round(
-      top.reduce((s, p, i) => s + p.ratings[k] * w[i], 0) /
-        w.reduce((a, b) => a + b, 0),
+    Math.round(top.reduce((s, p, i) => s + p.ratings[k] * w[i], 0) / wSum);
+  // Position-aware defensive share: guards defend the perimeter, bigs the paint.
+  const defShare = (p) => {
+    if (p.pos.includes("G")) return { per: 0.75, int: 0.25 };
+    if (p.pos.includes("C")) return { per: 0.2, int: 0.8 };
+    return { per: 0.5, int: 0.5 };
+  };
+  const posWeighted = (k, side) => {
+    const num = top.reduce(
+      (s, p, i) => s + p.ratings[k] * w[i] * defShare(p)[side],
+      0,
     );
-  const off = Math.round(
-    wavg("scoring") * 0.35 +
-      wavg("shooting") * 0.27 +
-      wavg("playmaking") * 0.24 +
-      wavg("iq") * 0.14,
+    const den = top.reduce((s, p, i) => s + w[i] * defShare(p)[side], 0);
+    return den ? Math.round(num / den) : 60;
+  };
+  const perO = Math.round(
+    wavg("shooting") * 0.5 + wavg("playmaking") * 0.3 + wavg("iq") * 0.2,
   );
-  const def = Math.round(
-    wavg("defense") * 0.48 +
-      wavg("athleticism") * 0.18 +
-      wavg("iq") * 0.17 +
-      wavg("rebounding") * 0.17,
+  const intO = Math.round(
+    wavg("scoring") * 0.45 +
+      wavg("rebounding") * 0.2 +
+      wavg("athleticism") * 0.35,
   );
+  const perD = Math.round(
+    posWeighted("defense", "per") * 0.55 +
+      posWeighted("athleticism", "per") * 0.25 +
+      wavg("iq") * 0.2,
+  );
+  const intD = Math.round(
+    posWeighted("defense", "int") * 0.5 +
+      wavg("rebounding") * 0.3 +
+      posWeighted("athleticism", "int") * 0.2,
+  );
+  const off = Math.round((perO + intO) / 2);
+  const def = Math.round((perD + intD) / 2);
   const reb = wavg("rebounding");
   return {
     overall: Math.round(off * 0.45 + def * 0.4 + reb * 0.15),
@@ -663,6 +695,11 @@ function teamPower(id) {
     def,
     reb,
     pace: wavg("athleticism"),
+    perO,
+    perD,
+    intO,
+    intD,
+    depth: meta.players.length,
   };
 }
 function rand(min, max) {
@@ -671,13 +708,59 @@ function rand(min, max) {
 function simScore(home, away) {
   const hp = teamPower(home),
     ap = teamPower(away);
-  const hBase = 76 + (hp.off - ap.def) * 0.34 + (hp.reb - ap.reb) * 0.12 + 2.2;
-  const aBase = 74 + (ap.off - hp.def) * 0.34 + (ap.reb - hp.reb) * 0.12;
-  let hs = Math.max(58, Math.round(hBase + rand(-9, 12)));
-  let as = Math.max(55, Math.round(aBase + rand(-10, 12)));
+  // Two head-to-head channels: perimeter scoring vs perimeter D, interior vs interior.
+  const hPer = 38 + (hp.perO - ap.perD) * 0.45;
+  const aPer = 37 + (ap.perO - hp.perD) * 0.45;
+  const hInt = 38 + (hp.intO - ap.intD) * 0.45;
+  const aInt = 37 + (ap.intO - hp.intD) * 0.45;
+  const hRebEdge = (hp.reb - ap.reb) * 0.1;
+  const aRebEdge = (ap.reb - hp.reb) * 0.1;
+  // Roster-depth penalty: thin benches add late-game variance.
+  const hThin = Math.max(0, 10 - hp.depth);
+  const aThin = Math.max(0, 10 - ap.depth);
+  const hBase = hPer + hInt + hRebEdge + 2.2; // 2.2 = home court
+  const aBase = aPer + aInt + aRebEdge;
+  let hs = Math.max(58, Math.round(hBase + rand(-5 - hThin, 6 + hThin)));
+  let as = Math.max(55, Math.round(aBase + rand(-5 - aThin, 6 + aThin)));
   if (hs === as) hs += rand(1, 5);
   return { hs, as, hp, ap };
 }
+// Dev helper: run N seasons over the current schedule and print win-rate by team.
+window.simTest = function (seasons = 20) {
+  if (!S.season || !S.season.schedule)
+    return console.log("Start a season first.");
+  const ids = S.teams.map((t) => t.id);
+  const wins = Object.fromEntries(ids.map((i) => [i, 0]));
+  const games = Object.fromEntries(ids.map((i) => [i, 0]));
+  const sched = S.season.schedule.map((g) => ({ home: g.home, away: g.away }));
+  for (let s = 0; s < seasons; s++) {
+    for (const g of sched) {
+      const r = simScore(g.home, g.away);
+      const winner = r.hs > r.as ? g.home : g.away;
+      wins[winner]++;
+      games[g.home]++;
+      games[g.away]++;
+    }
+  }
+  const rows = ids
+    .map((id) => {
+      const tp = teamPower(id);
+      return {
+        id,
+        name: teamMeta(id).name,
+        ovr: tp.overall,
+        perO: tp.perO,
+        perD: tp.perD,
+        intO: tp.intO,
+        intD: tp.intD,
+        record: `${wins[id]}-${games[id] - wins[id]}`,
+        pct: games[id] ? ((wins[id] / games[id]) * 100).toFixed(1) + "%" : "0%",
+      };
+    })
+    .sort((a, b) => b.ovr - a.ovr);
+  console.table(rows);
+  return rows;
+};
 function topPerformers(id, ptsFor) {
   const players = teamMeta(id)
     .players.slice()
@@ -798,7 +881,7 @@ function seasonKpis() {
   const r = seasonRecord(S.team.abbr);
   const p = teamPower(S.team.abbr);
   const next = nextUnplayed();
-  return `<div class="grid kpis"><div class="card kpi"><label>Record</label><div class="value">${r.w}-${r.l}</div><small>${r.w + r.l ? Math.round((r.w / (r.w + r.l)) * 100) : 0}% win rate</small></div><div class="card kpi"><label>Power Index</label><div class="value">${p.overall}</div><small>Off ${p.off} · Def ${p.def} · Reb ${p.reb}</small></div><div class="card kpi"><label>Next Game</label><div class="value">${next ? `W${next.week}` : "Done"}</div><small>${next ? `${teamMeta(next.away).id} at ${teamMeta(next.home).id}` : "Season complete"}</small></div><div class="card kpi"><label>Playoff Cut</label><div class="value">Top 8</div><small>${playoffStatus()}</small></div></div>`;
+  return `<div class="grid kpis"><div class="card kpi"><label>Record</label><div class="value">${r.w}-${r.l}</div><small>${r.w + r.l ? Math.round((r.w / (r.w + r.l)) * 100) : 0}% win rate</small></div><div class="card kpi"><label>Power Index</label><div class="value">${p.overall}</div><small>Per ${p.perO}/${p.perD} · Int ${p.intO}/${p.intD} · Reb ${p.reb}</small></div><div class="card kpi"><label>Next Game</label><div class="value">${next ? `W${next.week}` : "Done"}</div><small>${next ? `${teamMeta(next.away).id} at ${teamMeta(next.home).id}` : "Season complete"}</small></div><div class="card kpi"><label>Playoff Cut</label><div class="value">Top 8</div><small>${playoffStatus()}</small></div></div>`;
 }
 function playoffStatus() {
   const rows = standingsRows();
