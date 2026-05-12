@@ -225,11 +225,11 @@ function topbar() {
   const sub = S.offseason
     ? `Stage: ${S.offseason.stage === "aging" ? "Aging report" : S.offseason.stage === "draft" ? "Rookie draft" : "Complete"} · Year ${S.year} → ${S.year + 1}`
     : `${S.phase} · Year ${S.year} · Week ${S.week} · Simplified cap ${money(DATA.cap)}`;
-  return `<div class="topbar"><div><h2>${title}</h2><p>${sub}</p></div><div class="actions"><button class="btn secondary" data-action="advance">Advance Week</button><button class="btn secondary" data-action="simNext">Sim Next Game</button><button class="btn secondary" data-action="reset">New Save</button></div></div>`;
+  return `<div class="topbar"><div><h2>${title}</h2><p>${sub}</p></div><div class="actions"><button class="btn secondary" data-action="simNext">Play Next Game →</button><button class="btn secondary" data-action="reset">New Save</button></div></div>`;
 }
 function content() {
   if (S.offseason) return offseasonView();
-  if (S.gameDay) return gameDayView();
+  if (S.gameDay && tab === "schedule") return gameDayView();
   return {
     dashboard: dashboard(),
     draft: draft(),
@@ -947,7 +947,16 @@ function simulateGame(g) {
       : "League final",
     `${teamMeta(g.away).name} ${g.awayScore}, ${teamMeta(g.home).name} ${g.homeScore}. ${teamMeta(g.winner).name} win.`,
   );
-  if (g.home === S.team.abbr || g.away === S.team.abbr) maybeTriggerPress(g);
+  if (g.home === S.team.abbr || g.away === S.team.abbr) {
+    // Each user game advances the calendar: practice effects, dev growth, market churn, press.
+    applyWeeklyTransition();
+    marketChurn();
+    maybeTriggerPress(g);
+  }
+  // Keep S.week in sync with the schedule.
+  const next = S.season.schedule.find((x) => !x.played);
+  if (next) S.week = next.week;
+  else S.week = Math.max(...S.season.schedule.map((x) => x.week), S.week) + 1;
 }
 function nextUnplayed() {
   return S.season.schedule.find((g) => !g.played);
@@ -982,6 +991,7 @@ function simNextGame() {
   });
   S.week = Math.max(S.week, mine.week);
   S.gameDay = { gameId: mine.id };
+  tab = "schedule";
   save();
   render();
 }
@@ -1364,17 +1374,6 @@ function actions(a) {
       tab = "setup";
       render();
     }
-  }
-  if (a === "advance") {
-    S.week++;
-    marketChurn();
-    applyWeeklyTransition();
-    addLog(
-      "Week advanced",
-      `Front office calendar moves to Week ${S.week}. Practice plan applied, fatigue recovered, development logged.`,
-    );
-    save();
-    render();
   }
   if (a === "simNext") simNextGame();
   if (a === "simWeek") simWeek();
