@@ -62,6 +62,13 @@ function freshState() {
     playoffs: null,
     awards: [],
     pendingAwards: null,
+    coaches: {
+      head: clone(DATA.userStaffDefaults.head),
+      assistant: clone(DATA.userStaffDefaults.assistant),
+      dev: clone(DATA.userStaffDefaults.dev),
+      pendingBuff: null,
+      devAccumulator: 0,
+    },
     log: [],
     objectives: [
       { id: "roster11", text: "Draft at least 11 players", done: false },
@@ -101,6 +108,18 @@ function migrate(s) {
   if (s.playoffs === undefined) s.playoffs = null;
   if (!Array.isArray(s.awards)) s.awards = [];
   if (s.pendingAwards === undefined) s.pendingAwards = null;
+  if (!s.coaches) {
+    s.coaches = {
+      head: JSON.parse(JSON.stringify(DATA.userStaffDefaults.head)),
+      assistant: JSON.parse(JSON.stringify(DATA.userStaffDefaults.assistant)),
+      dev: JSON.parse(JSON.stringify(DATA.userStaffDefaults.dev)),
+      pendingBuff: null,
+      devAccumulator: 0,
+    };
+  }
+  if (!s.coaches.pendingBuff) s.coaches.pendingBuff = null;
+  if (typeof s.coaches.devAccumulator !== "number")
+    s.coaches.devAccumulator = 0;
   // Stats foundations for every player
   const ensureStats = (p) => {
     if (!p.seasonStats) p.seasonStats = { gp: 0, pts: 0, reb: 0, ast: 0, w: 0 };
@@ -935,9 +954,38 @@ function teamPower(id) {
 function rand(min, max) {
   return Math.floor(min + Math.random() * (max - min + 1));
 }
+function hcSystemMods(teamId) {
+  let systemId = null;
+  if (teamId === S.team.abbr) {
+    systemId = S.coaches && S.coaches.head && S.coaches.head.system;
+  } else {
+    const npc = DATA.npcHeadCoaches && DATA.npcHeadCoaches[teamId];
+    if (npc) systemId = npc.system;
+  }
+  if (!systemId) return { perO: 0, perD: 0, intO: 0, intD: 0, reb: 0 };
+  const sys = DATA.coachingSystems && DATA.coachingSystems[systemId];
+  return sys ? sys.mods : { perO: 0, perD: 0, intO: 0, intD: 0, reb: 0 };
+}
+function hcTraitMods(teamId) {
+  // Only user coach traits fire (NPC traits are flavor only).
+  const out = { perO: 0, perD: 0, intO: 0, intD: 0 };
+  if (teamId !== S.team.abbr) return out;
+  const traits = (S.coaches && S.coaches.head && S.coaches.head.traits) || [];
+  if (traits.includes("motion-offense")) out.perO += 1;
+  if (traits.includes("defensive-mind")) {
+    out.perD += 1;
+    out.intD += 1;
+  }
+  return out;
+}
 function simScore(home, away, game) {
   const hp = teamPower(home),
     ap = teamPower(away);
+  // Head-coach system biases apply to both teams (NPC + user).
+  const hSys = hcSystemMods(home);
+  const aSys = hcSystemMods(away);
+  const hTrait = hcTraitMods(home);
+  const aTrait = hcTraitMods(away);
   // Coaching modifiers when user team is in this game.
   const mod = {
     h: { perO: 0, perD: 0, intO: 0, intD: 0 },
@@ -947,15 +995,19 @@ function simScore(home, away, game) {
   if (userIs && S.coaching) {
     const m = mod[userIs];
     const f = S.coaching.weeklyFocus;
+    const asstTraits =
+      (S.coaches && S.coaches.assistant && S.coaches.assistant.traits) || [];
+    const filmBuff = asstTraits.includes("film-buff") ? 1 : 0;
     if (f === "perO") m.perO += 2;
     else if (f === "perD") m.perD += 2;
     else if (f === "intO") m.intO += 2;
     else if (f === "intD") m.intD += 2;
     else if (f === "film") {
-      m.perO += 1;
-      m.perD += 1;
-      m.intO += 1;
-      m.intD += 1;
+      const bonus = 1 + filmBuff; // Film Buff trait makes Film Study +2 per channel
+      m.perO += bonus;
+      m.perD += bonus;
+      m.intO += bonus;
+      m.intD += bonus;
     }
     const gp = game && S.coaching.gamePlans && S.coaching.gamePlans[game.id];
     if (gp) {
@@ -963,30 +1015,51 @@ function simScore(home, away, game) {
         m.perD += 1;
         m.intD += 1;
       }
+      // Veteran Tactician (HC) and Defensive Coordinator (Asst) both juice game plans.
+      const hcTraits =
+        (S.coaches && S.coaches.head && S.coaches.head.traits) || [];
+      const vt = hcTraits.includes("veteran-tactician");
+      const dc = asstTraits.includes("defensive-coordinator");
+      const planBonus = vt || dc ? 4 : 3;
+      const planPenalty = vt || dc ? 2 : 1;
       if (gp.plan === "pack") {
-        m.intD += 3;
-        m.perD -= 1;
+        m.intD += planBonus;
+        m.perD -= planPenalty;
       } else if (gp.plan === "extend") {
-        m.perD += 3;
-        m.intD -= 1;
+        m.perD += planBonus;
+        m.intD -= planPenalty;
       }
     }
+    // Inspiring trait: pending buff from a prior loss.
+    if (
+      S.coaches &&
+      S.coaches.pendingBuff &&
+      S.coaches.pendingBuff.type === "inspiring"
+    ) {
+      const b = S.coaches.pendingBuff.channelBonus || 3;
+      m.perO += b;
+      m.perD += b;
+      m.intO += b;
+      m.intD += b;
+    }
   }
-  const hPerO = hp.perO + mod.h.perO;
-  const hPerD = hp.perD + mod.h.perD;
-  const hIntO = hp.intO + mod.h.intO;
-  const hIntD = hp.intD + mod.h.intD;
-  const aPerO = ap.perO + mod.a.perO;
-  const aPerD = ap.perD + mod.a.perD;
-  const aIntO = ap.intO + mod.a.intO;
-  const aIntD = ap.intD + mod.a.intD;
+  const hPerO = hp.perO + mod.h.perO + hSys.perO + hTrait.perO;
+  const hPerD = hp.perD + mod.h.perD + hSys.perD + hTrait.perD;
+  const hIntO = hp.intO + mod.h.intO + hSys.intO + hTrait.intO;
+  const hIntD = hp.intD + mod.h.intD + hSys.intD + hTrait.intD;
+  const aPerO = ap.perO + mod.a.perO + aSys.perO + aTrait.perO;
+  const aPerD = ap.perD + mod.a.perD + aSys.perD + aTrait.perD;
+  const aIntO = ap.intO + mod.a.intO + aSys.intO + aTrait.intO;
+  const aIntD = ap.intD + mod.a.intD + aSys.intD + aTrait.intD;
   // Two head-to-head channels: perimeter scoring vs perimeter D, interior vs interior.
   const hPer = 38 + (hPerO - aPerD) * 0.45;
   const aPer = 37 + (aPerO - hPerD) * 0.45;
   const hInt = 38 + (hIntO - aIntD) * 0.45;
   const aInt = 37 + (aIntO - hIntD) * 0.45;
-  const hRebEdge = (hp.reb - ap.reb) * 0.1;
-  const aRebEdge = (ap.reb - hp.reb) * 0.1;
+  const hReb = hp.reb + (hSys.reb || 0);
+  const aReb = ap.reb + (aSys.reb || 0);
+  const hRebEdge = (hReb - aReb) * 0.1;
+  const aRebEdge = (aReb - hReb) * 0.1;
   // Roster-depth penalty: thin benches add late-game variance.
   const hThin = Math.max(0, 10 - hp.depth);
   const aThin = Math.max(0, 10 - ap.depth);
@@ -1154,6 +1227,35 @@ function simulateGame(g) {
     marketChurn();
     tickAllInjuries();
     maybeTriggerPress(g);
+    // Consume Inspiring buff if it was set (it applied this game).
+    if (S.coaches && S.coaches.pendingBuff) S.coaches.pendingBuff = null;
+    // Inspiring trait: a loss sets the buff for the NEXT user game.
+    const hcTraits =
+      (S.coaches && S.coaches.head && S.coaches.head.traits) || [];
+    if (g.winner !== S.team.abbr && hcTraits.includes("inspiring")) {
+      S.coaches.pendingBuff = { type: "inspiring", channelBonus: 3 };
+      addLog(
+        "Coach speech",
+        `${S.coaches.head.name} rallied the locker room. Team gets a boost next game.`,
+      );
+    }
+    // Motivator (assistant): mood bump after each user game.
+    const asstTraits =
+      (S.coaches && S.coaches.assistant && S.coaches.assistant.traits) || [];
+    if (asstTraits.includes("motivator")) {
+      S.roster.forEach(
+        (p) => (p.mood = Math.max(20, Math.min(99, (p.mood || 60) + 2))),
+      );
+    }
+    // Scout Genius (assistant): auto-scout the next user opponent.
+    if (asstTraits.includes("scout-genius")) {
+      const upcoming = userUpcomingGames(1)[0];
+      if (upcoming && S.coaching.gamePlans) {
+        if (!S.coaching.gamePlans[upcoming.id])
+          S.coaching.gamePlans[upcoming.id] = { scouted: false, plan: null };
+        S.coaching.gamePlans[upcoming.id].scouted = true;
+      }
+    }
   }
   // Keep S.week in sync with the schedule.
   const next = S.season.schedule.find((x) => !x.played);
@@ -2728,18 +2830,35 @@ function userUpcomingGames(n) {
     .slice(0, n || 3);
 }
 function applyWeeklyTransition() {
-  // Player dev focus: +1 to chosen rating per user game, capped at potential.
+  // Player dev focus: gains per game scaled by dev coach skill multipliers.
   const df = S.coaching.devFocus;
   if (df && df.playerId) {
     const target = S.roster.find((p) => p.id === df.playerId);
     if (target) {
       const k = df.rating;
       const cap = Math.min(99, target.ratings.potential);
-      if (target.ratings[k] < cap) {
+      const dev = S.coaches && S.coaches.dev;
+      const mult = (dev && dev.devMultipliers && dev.devMultipliers[k]) || 1.0;
+      const mentorBonus =
+        dev && dev.traits && dev.traits.includes("mentor") ? 0.3 : 0;
+      S.coaches.devAccumulator =
+        (S.coaches.devAccumulator || 0) + mult + mentorBonus;
+      let pts = 0;
+      while (S.coaches.devAccumulator >= 1 && target.ratings[k] < cap) {
         target.ratings[k] = Math.min(cap, (target.ratings[k] || 0) + 1);
+        S.coaches.devAccumulator -= 1;
+        pts++;
+      }
+      if (pts > 0) {
         addLog(
           "Development",
-          `${target.name} improved +1 in ${k} after focused practice.`,
+          `${target.name} improved +${pts} in ${k} (${dev ? dev.name : "dev"}, ${mult.toFixed(1)}x).`,
+        );
+      } else if (S.coaches.devAccumulator < 1 && target.ratings[k] < cap) {
+        // Sub-1.0 multiplier — show progress without a level-up
+        addLog(
+          "Development",
+          `${target.name} working on ${k} (${S.coaches.devAccumulator.toFixed(1)}/1.0 toward next bump).`,
         );
       }
     }
@@ -2873,7 +2992,39 @@ function respondToPress(optId) {
   render();
 }
 function coachingView() {
-  return `${kpis()}<div class="layout2"><div>${weeklyFocusSection()}${devFocusSection()}</div><div>${pressSection()}${injurySection()}</div></div><p class="muted" style="margin-top:14px;text-align:center">Pre-game scouting and game plans now live on the <b>Season</b> tab, alongside your upcoming opponents.</p>`;
+  return `${kpis()}${coachingStaffSection()}<div class="layout2" style="margin-top:18px"><div>${weeklyFocusSection()}${devFocusSection()}</div><div>${pressSection()}${injurySection()}</div></div><p class="muted" style="margin-top:14px;text-align:center">Pre-game scouting and game plans live on the <b>Season</b> tab.</p>`;
+}
+function coachingStaffSection() {
+  const c = S.coaches || {};
+  const hc = c.head;
+  const asst = c.assistant;
+  const dev = c.dev;
+  const traitChips = (traits) =>
+    (traits || [])
+      .map((t) => {
+        const label = (DATA.coachTraitLabels && DATA.coachTraitLabels[t]) || t;
+        return `<span class="tag">${label}</span>`;
+      })
+      .join("");
+  const sys = hc && DATA.coachingSystems && DATA.coachingSystems[hc.system];
+  const sysLine = sys
+    ? `<div class="mini" style="margin-top:4px"><b>${sys.label}</b> — ${sys.desc}</div>`
+    : "";
+  const buffLine =
+    c.pendingBuff && c.pendingBuff.type === "inspiring"
+      ? `<div class="mini" style="margin-top:6px;color:var(--orange);font-weight:800">Inspiring buff queued for next game (+3 all channels).</div>`
+      : "";
+  const devMults =
+    dev && dev.devMultipliers
+      ? Object.entries(dev.devMultipliers)
+          .map(([k, v]) => `<span class="tag">${k} ${v.toFixed(1)}x</span>`)
+          .join("")
+      : "";
+  const devProgress =
+    c.devAccumulator > 0
+      ? `<div class="mini" style="margin-top:4px">In progress: ${c.devAccumulator.toFixed(2)}/1.0 toward next rating bump</div>`
+      : "";
+  return `<section class="card"><div class="sectionTitle"><h3>Coaching Staff</h3><span>your sideline brain trust</span></div><div class="cardPad"><div class="layout3"><div><div class="mini" style="text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:800">Head Coach</div><div style="font-size:18px;font-weight:900;margin-top:4px">${hc ? hc.name : "—"}</div>${sysLine}<div class="tags" style="margin-top:8px">${hc ? traitChips(hc.traits) : ""}</div>${buffLine}</div><div><div class="mini" style="text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:800">Assistant Coach</div><div style="font-size:18px;font-weight:900;margin-top:4px">${asst ? asst.name : "—"}</div><div class="tags" style="margin-top:8px">${asst ? traitChips(asst.traits) : ""}</div></div><div><div class="mini" style="text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:800">Player Development</div><div style="font-size:18px;font-weight:900;margin-top:4px">${dev ? dev.name : "—"}</div><div class="tags" style="margin-top:8px">${dev ? traitChips(dev.traits) : ""}</div><div class="tags" style="margin-top:6px">${devMults}</div>${devProgress}</div></div></div></section>`;
 }
 function weeklyFocusSection() {
   const cur = S.coaching.weeklyFocus;

@@ -350,6 +350,151 @@ window.GAME_DATA = {
       "prospect",
     ),
   ],
+  // Head coach systems — each tag applies a set of channel mods in simScore.
+  coachingSystems: {
+    "pace-and-space": {
+      label: "Pace and Space",
+      desc: "Run, space, shoot. +2 perimeter offense, -1 interior defense.",
+      mods: { perO: 2, perD: 0, intO: 0, intD: -1, reb: 0 },
+    },
+    "defensive-anchor": {
+      label: "Defensive Anchor",
+      desc: "Grind it out. +2 to both defensive channels, -1 perimeter offense.",
+      mods: { perO: -1, perD: 2, intO: 0, intD: 2, reb: 0 },
+    },
+    "inside-out": {
+      label: "Inside-Out",
+      desc: "Pound the paint. +2 interior offense, +1 rebounding edge, -1 perimeter offense.",
+      mods: { perO: -1, perD: 0, intO: 2, intD: 0, reb: 1 },
+    },
+    balanced: {
+      label: "Balanced",
+      desc: "Match-up agnostic. +1 to all four channels.",
+      mods: { perO: 1, perD: 1, intO: 1, intD: 1, reb: 0 },
+    },
+    "tempo-control": {
+      label: "Tempo Control",
+      desc: "Slow tempo, defensive shell. -1 perimeter offense, +2 perimeter defense, +1 interior defense.",
+      mods: { perO: -1, perD: 2, intO: 0, intD: 1, reb: 0 },
+    },
+  },
+  // NPC head coaches keyed by team id. System tag biases their sim. Traits
+  // are descriptive; they don't fire for NPCs (only the user's coach traits do).
+  npcHeadCoaches: {
+    ATL: {
+      name: "Karl Smesko",
+      system: "pace-and-space",
+      traits: ["motion-offense"],
+    },
+    CHI: { name: "Tyler Marsh", system: "defensive-anchor", traits: [] },
+    CON: {
+      name: "Rachid Meziane",
+      system: "tempo-control",
+      traits: ["international-experience"],
+    },
+    DAL: {
+      name: "Jose Fernandez",
+      system: "balanced",
+      traits: ["veteran-tactician"],
+    },
+    GS: {
+      name: "Natalie Nakase",
+      system: "defensive-anchor",
+      traits: ["young-coach"],
+    },
+    IND: {
+      name: "Stephanie White",
+      system: "defensive-anchor",
+      traits: ["clutch"],
+    },
+    LV: {
+      name: "Becky Hammon",
+      system: "balanced",
+      traits: ["clutch", "championship-pedigree"],
+    },
+    LA: { name: "Lynne Roberts", system: "pace-and-space", traits: [] },
+    MIN: {
+      name: "Cheryl Reeve",
+      system: "balanced",
+      traits: ["veteran-tactician", "championship-pedigree"],
+    },
+    NY: { name: "Chris DeMarco", system: "pace-and-space", traits: [] },
+    PHX: {
+      name: "Nate Tibbetts",
+      system: "defensive-anchor",
+      traits: ["defensive-mind"],
+    },
+    SEA: { name: "Sonia Raman", system: "balanced", traits: [] },
+    WAS: {
+      name: "Sydney Johnson",
+      system: "balanced",
+      traits: ["young-developer"],
+    },
+    POR: {
+      name: "Alex Sarama",
+      system: "pace-and-space",
+      traits: ["international-experience"],
+    },
+    TOR: {
+      name: "Sandy Brondello",
+      system: "defensive-anchor",
+      traits: ["championship-pedigree", "veteran-tactician"],
+    },
+  },
+  // User's starting coaching staff. Pluggable: replace these to start a new game with different defaults.
+  userStaffDefaults: {
+    head: {
+      id: "user-hc-marsh",
+      name: "Lena Marsh",
+      system: "balanced",
+      traits: ["young-coach"],
+    },
+    assistant: {
+      id: "user-asst-hill",
+      name: "Marcus Hill",
+      traits: ["film-buff"],
+    },
+    dev: {
+      id: "user-dev-reyes",
+      name: "Jordan Reyes",
+      traits: ["balanced-developer"],
+      devMultipliers: {
+        scoring: 1.0,
+        shooting: 1.0,
+        playmaking: 1.0,
+        defense: 1.0,
+        rebounding: 1.0,
+        athleticism: 1.0,
+        iq: 1.0,
+      },
+    },
+  },
+  // Coach trait labels and effects, for UI display
+  coachTraitLabels: {
+    "motion-offense": "Motion Offense (+1 perimeter offense)",
+    "defensive-mind": "Defensive Mind (+1 to both defensive channels)",
+    inspiring: "Inspiring (after a loss, +3 all channels in next game)",
+    clutch: "Clutch (sim variance tightened — better in close games)",
+    "veteran-tactician": "Veteran Tactician (game plan bonus doubled)",
+    "championship-pedigree":
+      "Championship Pedigree (small variance bonus in playoff games)",
+    "international-experience":
+      "International Experience (foreign rookies grow faster)",
+    "young-coach": "Young Coach (no special bonus yet — open to growth)",
+    "young-developer": "Young Developer (rookies +0.2 dev gain)",
+    "film-buff":
+      "Film Buff (Film Study focus gives +2 to all channels instead of +1)",
+    "scout-genius": "Scout Genius (auto-scout next opponent each week)",
+    "defensive-coordinator":
+      "Defensive Coordinator (game plan grants +4/-2 instead of +3/-1)",
+    motivator: "Motivator (+2 mood per user game)",
+    mentor: "Mentor (all dev multipliers +0.3)",
+    "shooting-specialist": "Shooting Specialist (1.5x shooting growth)",
+    "defense-specialist": "Defense Specialist (1.5x defense growth)",
+    "playmaking-specialist": "Playmaking Specialist (1.5x playmaking growth)",
+    "rebounding-specialist": "Rebounding Specialist (1.5x rebounding growth)",
+    "balanced-developer": "Balanced Developer (1.0x all skills, no specialty)",
+  },
   // Add named players to specific future rookie classes here.
   // They'll be appended to that year's class (auto-generated names for empty years).
   // Each entry is a year-keyed array of p(...) calls — same 18-arg signature as teams.
