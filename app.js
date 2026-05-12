@@ -58,6 +58,7 @@ function freshState() {
       pressLog: [],
     },
     gameDay: null,
+    postGame: null,
     log: [],
     objectives: [
       { id: "roster11", text: "Draft at least 11 players", done: false },
@@ -93,6 +94,7 @@ function migrate(s) {
     };
   }
   if (s.gameDay === undefined) s.gameDay = null;
+  if (s.postGame === undefined) s.postGame = null;
   // Ensure injury field on every player record (fatigue field is left orphaned for backward compat)
   const ensureInjury = (p) => {
     if (p.injury === undefined) p.injury = null;
@@ -192,13 +194,42 @@ function checkObjectives() {
     if (o.id === "future") o.done = S.picks.you >= 2;
   });
 }
+function captureFocus() {
+  const f = document.activeElement;
+  if (!f || f === document.body) return null;
+  if (!["INPUT", "TEXTAREA", "SELECT"].includes(f.tagName)) return null;
+  let sel = null;
+  if (f.id) sel = "#" + CSS.escape(f.id);
+  else if (f.dataset && f.dataset.tradeQuery !== undefined)
+    sel = "[data-trade-query]";
+  else if (f.dataset && f.dataset.filter)
+    sel = `[data-filter="${f.dataset.filter}"]`;
+  if (!sel) return null;
+  return {
+    selector: sel,
+    start: f.selectionStart,
+    end: f.selectionEnd,
+  };
+}
+function restoreFocus(info) {
+  if (!info) return;
+  const el = document.querySelector(info.selector);
+  if (!el || !el.focus) return;
+  el.focus();
+  try {
+    if (info.start != null && el.setSelectionRange)
+      el.setSelectionRange(info.start, info.end);
+  } catch (e) {}
+}
 function render() {
+  const focusInfo = captureFocus();
   ensureSeason();
   checkObjectives();
   document.documentElement.style.setProperty("--user1", S.team.primary);
   document.documentElement.style.setProperty("--user2", S.team.secondary);
   root().innerHTML = S.started ? shell() : setupPage();
   bind();
+  restoreFocus(focusInfo);
   save();
 }
 function shell() {
@@ -237,6 +268,7 @@ function topbar() {
 }
 function content() {
   if (S.offseason) return offseasonView();
+  if (S.postGame && tab === "schedule") return postGameView();
   if (S.gameDay && tab === "schedule") return gameDayView();
   return {
     dashboard: dashboard(),
@@ -353,6 +385,22 @@ function leaguePressure() {
     })
     .join("");
 }
+const STRENGTH_TAGS = [
+  "shooting",
+  "scoring",
+  "defense",
+  "rebound",
+  "playmaking",
+  "passing",
+  "athleticism",
+  "length",
+  "iq",
+  "motor",
+  "post",
+  "rim",
+  "range",
+  "transition",
+];
 function draft() {
   const pool = filteredDraftPool();
   const archOpts =
@@ -361,7 +409,13 @@ function draft() {
       (a) =>
         `<option value="${a}" ${draftFilters.arch === a ? "selected" : ""}>${a}</option>`,
     ).join("");
-  return `${kpis()}<section class="card"><div class="sectionTitle"><h3>Available Expansion Pool</h3><span>protected stars are visible but locked unless acquired by trade</span></div><div class="filters"><input data-filter="q" placeholder="Search name/team/scouting" value="${draftFilters.q}"><input data-filter="strength" placeholder="Strength contains (e.g. shooting)" value="${draftFilters.strength}"><select data-filter="pos"><option>ALL</option>${["G", "F", "C"].map((x) => `<option ${draftFilters.pos === x ? "selected" : ""}>${x}</option>`).join("")}</select><select data-filter="team"><option>ALL</option>${S.teams.map((t) => `<option value="${t.id}" ${draftFilters.team === t.id ? "selected" : ""}>${t.name}</option>`).join("")}</select><select data-filter="arch">${archOpts}</select><select data-filter="risk"><option value="ALL">All risk profiles</option><option ${draftFilters.risk === "upside" ? "selected" : ""} value="upside">Upside</option><option ${draftFilters.risk === "safe" ? "selected" : ""} value="safe">Safe veterans</option><option ${draftFilters.risk === "cheap" ? "selected" : ""} value="cheap">Cheap contracts</option></select></div><div class="board">${pool.map(playerDraftCard).join("") || '<div class="empty">No players match those filters.</div>'}</div></section>`;
+  const strengthOpts =
+    `<option value="">Any strength</option>` +
+    STRENGTH_TAGS.map(
+      (s) =>
+        `<option value="${s}" ${draftFilters.strength === s ? "selected" : ""}>${s}</option>`,
+    ).join("");
+  return `${kpis()}<section class="card"><div class="sectionTitle"><h3>Available Expansion Pool</h3><span>protected stars are visible but locked unless acquired by trade</span></div><div class="filters"><input data-filter="q" placeholder="Search name/team/scouting" value="${draftFilters.q}"><select data-filter="strength">${strengthOpts}</select><select data-filter="pos"><option>ALL</option>${["G", "F", "C"].map((x) => `<option ${draftFilters.pos === x ? "selected" : ""}>${x}</option>`).join("")}</select><select data-filter="team"><option>ALL</option>${S.teams.map((t) => `<option value="${t.id}" ${draftFilters.team === t.id ? "selected" : ""}>${t.name}</option>`).join("")}</select><select data-filter="arch">${archOpts}</select><select data-filter="risk"><option value="ALL">All risk profiles</option><option ${draftFilters.risk === "upside" ? "selected" : ""} value="upside">Upside</option><option ${draftFilters.risk === "safe" ? "selected" : ""} value="safe">Safe veterans</option><option ${draftFilters.risk === "cheap" ? "selected" : ""} value="cheap">Cheap contracts</option></select></div><div class="board">${pool.map(playerDraftCard).join("") || '<div class="empty">No players match those filters.</div>'}</div></section>`;
 }
 function filteredDraftPool() {
   return allLeaguePlayers()
@@ -670,6 +724,22 @@ function ensureSeason(force = false) {
 }
 function leagueIds() {
   return [S.team.abbr, ...S.teams.map((t) => t.id)];
+}
+function leagueChannelAvg(key) {
+  const ids = leagueIds();
+  if (!ids.length) return 65;
+  return Math.round(
+    ids.reduce((s, id) => s + (teamPower(id)[key] || 0), 0) / ids.length,
+  );
+}
+function recommendPlan(oppPower) {
+  const avgInt = leagueChannelAvg("intO");
+  const avgPer = leagueChannelAvg("perO");
+  const intLean = oppPower.intO - avgInt;
+  const perLean = oppPower.perO - avgPer;
+  if (intLean > perLean + 2) return "pack";
+  if (perLean > intLean + 2) return "extend";
+  return null;
 }
 function teamMeta(id) {
   if (id === S.team.abbr)
@@ -1020,6 +1090,12 @@ function playQueuedGame() {
   }
   simulateGame(g);
   S.gameDay = null;
+  S.postGame = { gameId: g.id };
+  save();
+  render();
+}
+function closePostGame() {
+  S.postGame = null;
   save();
   render();
 }
@@ -1099,7 +1175,14 @@ function nextGameHero(g) {
   };
   const focusLabel = currentFocusLabel();
   const scoutBlock = gp.scouted
-    ? `<div class="impact" style="margin-top:10px"><div class="impactRow"><span>Per O</span><div class="bar"><i style="width:${oppPower.perO}%"></i></div><b>${oppPower.perO}</b></div><div class="impactRow"><span>Per D</span><div class="bar"><i style="width:${oppPower.perD}%"></i></div><b>${oppPower.perD}</b></div><div class="impactRow"><span>Int O</span><div class="bar"><i style="width:${oppPower.intO}%"></i></div><b>${oppPower.intO}</b></div><div class="impactRow"><span>Int D</span><div class="bar"><i style="width:${oppPower.intD}%"></i></div><b>${oppPower.intD}</b></div></div><p class="muted" style="margin-top:8px">${oppPower.intO > oppPower.perO ? "Interior-heavy attack. Pack the Paint covers their best lane." : "Perimeter-driven offense. Extend Defense closes their shooters."}</p>`
+    ? `<div class="impact" style="margin-top:10px"><div class="impactRow"><span>Per O</span><div class="bar"><i style="width:${oppPower.perO}%"></i></div><b>${oppPower.perO}</b></div><div class="impactRow"><span>Per D</span><div class="bar"><i style="width:${oppPower.perD}%"></i></div><b>${oppPower.perD}</b></div><div class="impactRow"><span>Int O</span><div class="bar"><i style="width:${oppPower.intO}%"></i></div><b>${oppPower.intO}</b></div><div class="impactRow"><span>Int D</span><div class="bar"><i style="width:${oppPower.intD}%"></i></div><b>${oppPower.intD}</b></div></div><p class="muted" style="margin-top:8px">${(() => {
+        const r = recommendPlan(oppPower);
+        return r === "pack"
+          ? "Interior-leaning attack — Pack the Paint covers their best lane."
+          : r === "extend"
+            ? "Perimeter-leaning attack — Extend Defense closes their shooters."
+            : "Balanced opponent — neither plan offers a clear edge.";
+      })()}</p>`
     : `<div style="margin-top:10px"><button class="btn secondary" data-scout="${g.id}">Scout Opponent</button></div>`;
   const planBlock = gp.scouted
     ? `<div class="actions" style="margin-top:10px"><button class="btn ${gp.plan === "pack" ? "" : "secondary"}" data-plan="${g.id}|pack">Pack the Paint</button><button class="btn ${gp.plan === "extend" ? "" : "secondary"}" data-plan="${g.id}|extend">Extend Defense</button>${gp.plan ? `<button class="btn ghost" data-plan="${g.id}|none">Clear plan</button>` : ""}</div>`
@@ -1143,14 +1226,56 @@ function gameDayView() {
     .sort((a, b) => composite(b) - composite(a))
     .slice(0, 8);
   const injuredCount = S.roster.filter((p) => p.injury).length;
-  const oppFocus = oppPower.intO > oppPower.perO ? "interior" : "perimeter";
-  const recommendedPlan = oppPower.intO > oppPower.perO ? "pack" : "extend";
+  const recommendedPlan = recommendPlan(oppPower);
+  const recLine =
+    recommendedPlan === "pack"
+      ? "Opponent leans <b>interior</b>. Scouts recommend <b>Pack the Paint</b>."
+      : recommendedPlan === "extend"
+        ? "Opponent leans <b>perimeter</b>. Scouts recommend <b>Extend Defense</b>."
+        : "Opponent is <b>balanced</b>. Neither plan offers a clear edge — coach's call.";
   const scoutBlock = gp.scouted
-    ? `<div class="impact" style="margin-top:10px"><div class="impactRow"><span>Per O</span><div class="bar"><i style="width:${oppPower.perO}%"></i></div><b>${oppPower.perO}</b></div><div class="impactRow"><span>Per D</span><div class="bar"><i style="width:${oppPower.perD}%"></i></div><b>${oppPower.perD}</b></div><div class="impactRow"><span>Int O</span><div class="bar"><i style="width:${oppPower.intO}%"></i></div><b>${oppPower.intO}</b></div><div class="impactRow"><span>Int D</span><div class="bar"><i style="width:${oppPower.intD}%"></i></div><b>${oppPower.intD}</b></div></div><p class="muted" style="margin-top:8px">Opponent leans <b>${oppFocus}</b>. Scouts recommend <b>${recommendedPlan === "pack" ? "Pack the Paint" : "Extend Defense"}</b>.</p>`
+    ? `<div class="impact" style="margin-top:10px"><div class="impactRow"><span>Per O</span><div class="bar"><i style="width:${oppPower.perO}%"></i></div><b>${oppPower.perO}</b></div><div class="impactRow"><span>Per D</span><div class="bar"><i style="width:${oppPower.perD}%"></i></div><b>${oppPower.perD}</b></div><div class="impactRow"><span>Int O</span><div class="bar"><i style="width:${oppPower.intO}%"></i></div><b>${oppPower.intO}</b></div><div class="impactRow"><span>Int D</span><div class="bar"><i style="width:${oppPower.intD}%"></i></div><b>${oppPower.intD}</b></div></div><p class="muted" style="margin-top:8px">${recLine}</p>`
     : `<div style="margin-top:10px"><button class="btn" data-scout="${g.id}">Scout Opponent</button><p class="muted" style="margin-top:8px">Skipping the scout means flying blind. You can still set a plan, but you won't know which lane to defend.</p></div>`;
   const planBlock = `<div class="actions" style="margin-top:10px"><button class="btn ${gp.plan === "pack" ? "" : "secondary"}" data-plan="${g.id}|pack">Pack the Paint</button><button class="btn ${gp.plan === "extend" ? "" : "secondary"}" data-plan="${g.id}|extend">Extend Defense</button>${gp.plan ? `<button class="btn ghost" data-plan="${g.id}|none">Clear</button>` : ""}</div>`;
   const rotationTable = `<table class="table"><thead><tr><th>Player</th><th>Pos</th><th>Status</th><th>Mood</th></tr></thead><tbody>${topRotation.map((p) => `<tr style="${p.injury ? "opacity:.5" : ""}"><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div class="playerName">${p.name}</div></div></td><td>${p.pos}</td><td>${injuryBadge(p)}</td><td>${p.mood || 60}</td></tr>`).join("")}</tbody></table>`;
   return `<section class="card"><div class="sectionTitle"><h3>Game Day · Week ${g.week} · ${isHome ? "vs" : "at"} ${opp.name}</h3><span>${opp.id} ${oppRec.w}-${oppRec.l}</span></div><div class="cardPad"><div class="layout2"><section><h3 style="margin-top:0">Opponent</h3><p class="muted">${opp.name} · ${oppRec.w}-${oppRec.l} · power index ${oppPower.overall}</p>${scoutBlock}<h3 style="margin-top:18px">Your Game Plan</h3>${planBlock}</section><section><h3 style="margin-top:0">Your Prep</h3><p class="muted">Weekly Focus: <b>${currentFocusLabel()}</b></p><p class="muted">Plan: <b>${gp.plan === "pack" ? "Pack the Paint" : gp.plan === "extend" ? "Extend Defense" : "Not set"}</b></p><p class="muted">Power Index: <b>${myPower.overall}</b> · Per ${myPower.perO}/${myPower.perD} · Int ${myPower.intO}/${myPower.intD}</p><p class="muted">Injured players: <b>${injuredCount}</b></p></section></div><h3 style="margin-top:18px">Top-8 Rotation</h3>${rotationTable}<div class="actions" style="margin-top:18px"><button class="btn" data-action="playQueuedGame" style="font-size:15px;padding:14px 20px">Play Game →</button><button class="btn secondary" data-action="closeGameDay">Hold Off</button></div></div></section>`;
+}
+function postGameView() {
+  if (!S.postGame) return '<div class="empty">No recent game.</div>';
+  const g = S.season.schedule.find((x) => x.id === S.postGame.gameId);
+  if (!g) {
+    S.postGame = null;
+    return '<div class="empty">Game not found.</div>';
+  }
+  const isHome = g.home === S.team.abbr;
+  const oppId = isHome ? g.away : g.home;
+  const opp = teamMeta(oppId);
+  const userScore = isHome ? g.homeScore : g.awayScore;
+  const oppScore = isHome ? g.awayScore : g.homeScore;
+  const won = g.winner === S.team.abbr;
+  const margin = Math.abs(userScore - oppScore);
+  const userBox = isHome ? g.box.home : g.box.away;
+  const oppBox = isHome ? g.box.away : g.box.home;
+  const headline = won
+    ? margin >= 15
+      ? `Statement win over ${opp.name}!`
+      : margin <= 4
+        ? `Hard-fought win over ${opp.name}`
+        : `Win over ${opp.name}`
+    : margin >= 15
+      ? `Blowout loss to ${opp.name}`
+      : margin <= 4
+        ? `Heartbreaking loss to ${opp.name}`
+        : `Loss to ${opp.name}`;
+  const bannerBg = won ? "#fff6ee" : "#fde8e6";
+  const bannerBorder = won ? "var(--orange)" : "var(--red)";
+  const press = S.coaching.pendingPress;
+  const pressBlock = press
+    ? `<div class="logItem" style="border-color:var(--orange);background:#fff6ee;margin-top:18px"><b>${press.headline}</b><p class="muted">${press.body}</p><div class="actions" style="flex-direction:column;align-items:stretch;gap:8px">${press.options.map((o) => `<button class="btn secondary" data-press="${o.id}" style="text-align:left">${o.text}</button>`).join("")}</div></div>`
+    : "";
+  const boxRow = (p) =>
+    `<div class="checkRow"><div><b>${p.name}</b> <span class="pill">${p.pos}</span><div class="mini">${p.pts} pts · ${p.reb} reb · ${p.ast} ast</div></div></div>`;
+  return `<section class="card"><div class="sectionTitle"><h3>${headline}</h3><span>Week ${g.week}</span></div><div class="cardPad"><div style="display:flex;gap:24px;justify-content:center;align-items:center;padding:24px;background:${bannerBg};border:2px solid ${bannerBorder};border-radius:18px;margin-bottom:18px"><div style="text-align:center;min-width:140px"><div style="font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:800">${isHome ? "Home" : "Away"}</div><div style="font-size:18px;font-weight:800">${S.team.nickname}</div><div style="font-size:56px;font-weight:900;letter-spacing:-.04em;color:${won ? "var(--green)" : "var(--ink)"}">${userScore}</div></div><div style="font-size:22px;color:var(--muted);font-weight:800">vs</div><div style="text-align:center;min-width:140px"><div style="font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:800">${isHome ? "Away" : "Home"}</div><div style="font-size:18px;font-weight:800">${opp.name}</div><div style="font-size:56px;font-weight:900;letter-spacing:-.04em;color:${!won ? "var(--green)" : "var(--ink)"}">${oppScore}</div></div></div>${pressBlock}<div class="layout2" style="margin-top:18px"><section><h3>${S.team.nickname} top performers</h3>${userBox.map(boxRow).join("")}</section><section><h3>${opp.name} top performers</h3>${oppBox.map(boxRow).join("")}</section></div><div class="actions" style="margin-top:20px"><button class="btn" data-action="closePostGame" style="font-size:15px;padding:14px 20px">Continue →</button></div></div></section>`;
 }
 function seasonKpis() {
   const r = seasonRecord(S.team.abbr);
@@ -1426,6 +1551,7 @@ function actions(a) {
   }
   if (a === "playQueuedGame") playQueuedGame();
   if (a === "closeGameDay") closeGameDay();
+  if (a === "closePostGame") closePostGame();
 }
 function draftPlayer(id) {
   const team = S.teams.find((t) => t.players.some((p) => p.id === id));
@@ -2267,7 +2393,14 @@ function nextGamesSection() {
         plan: null,
       };
       const scoutBlock = gp.scouted
-        ? `<div class="impact"><div class="impactRow"><span>Per O</span><div class="bar"><i style="width:${oppPower.perO}%"></i></div><b>${oppPower.perO}</b></div><div class="impactRow"><span>Per D</span><div class="bar"><i style="width:${oppPower.perD}%"></i></div><b>${oppPower.perD}</b></div><div class="impactRow"><span>Int O</span><div class="bar"><i style="width:${oppPower.intO}%"></i></div><b>${oppPower.intO}</b></div><div class="impactRow"><span>Int D</span><div class="bar"><i style="width:${oppPower.intD}%"></i></div><b>${oppPower.intD}</b></div></div><div class="mini" style="margin-top:8px">Tip: ${oppPower.intO > oppPower.perO ? "Interior-heavy attack — Pack the Paint defends their best lane." : "Perimeter-driven offense — Extend Defense closes their shooters."}</div>`
+        ? `<div class="impact"><div class="impactRow"><span>Per O</span><div class="bar"><i style="width:${oppPower.perO}%"></i></div><b>${oppPower.perO}</b></div><div class="impactRow"><span>Per D</span><div class="bar"><i style="width:${oppPower.perD}%"></i></div><b>${oppPower.perD}</b></div><div class="impactRow"><span>Int O</span><div class="bar"><i style="width:${oppPower.intO}%"></i></div><b>${oppPower.intO}</b></div><div class="impactRow"><span>Int D</span><div class="bar"><i style="width:${oppPower.intD}%"></i></div><b>${oppPower.intD}</b></div></div><div class="mini" style="margin-top:8px">Tip: ${(() => {
+            const r = recommendPlan(oppPower);
+            return r === "pack"
+              ? "Interior-leaning — Pack the Paint defends their best lane."
+              : r === "extend"
+                ? "Perimeter-leaning — Extend Defense closes their shooters."
+                : "Balanced opponent — neither plan stands out.";
+          })()}</div>`
         : `<button class="btn secondary" data-scout="${g.id}">Scout Opponent</button>`;
       const planBlock = gp.scouted
         ? `<div class="actions" style="margin-top:10px"><button class="btn ${gp.plan === "pack" ? "" : "secondary"}" data-plan="${g.id}|pack">Pack the Paint</button><button class="btn ${gp.plan === "extend" ? "" : "secondary"}" data-plan="${g.id}|extend">Extend Defense</button>${gp.plan ? `<button class="btn ghost" data-plan="${g.id}|none">Clear</button>` : ""}</div>`
