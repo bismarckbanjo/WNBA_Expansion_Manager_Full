@@ -40,6 +40,7 @@ function freshState() {
     season: null,
     year: 2026,
     offseason: null,
+    customRookies: {},
     log: [],
     objectives: [
       { id: "roster11", text: "Draft at least 11 players", done: false },
@@ -62,6 +63,8 @@ function migrate(s) {
   if (!s) return s;
   if (typeof s.year !== "number") s.year = 2026;
   if (s.offseason === undefined) s.offseason = null;
+  if (!s.customRookies || typeof s.customRookies !== "object")
+    s.customRookies = {};
   return s;
 }
 function load() {
@@ -164,7 +167,7 @@ function render() {
   save();
 }
 function shell() {
-  return `<div class="appShell"><aside class="side"><div class="brand"><div class="logo"></div><div><h1>${S.team.city} ${S.team.nickname}</h1><p>Expansion Front Office</p></div></div><nav class="nav">${navBtn("dashboard", "Dashboard")} ${navBtn("draft", "Expansion Draft")} ${navBtn("roster", "Roster")} ${navBtn("schedule", "Season")} ${navBtn("trades", "Trade Desk")} ${navBtn("waivers", "Waivers")} ${navBtn("league", "League")}</nav><div class="sideCard"><div class="mini">Front Office Score</div><div class="big">${frontOfficeScore()}</div><p>${frontOfficeNote()}</p></div></aside><main class="main">${topbar()}${content()}${modalHtml()}</main></div>`;
+  return `<div class="appShell"><aside class="side"><div class="brand"><div class="logo"></div><div><h1>${S.team.city} ${S.team.nickname}</h1><p>Expansion Front Office</p></div></div><nav class="nav">${navBtn("dashboard", "Dashboard")} ${navBtn("draft", "Expansion Draft")} ${navBtn("roster", "Roster")} ${navBtn("schedule", "Season")} ${navBtn("trades", "Trade Desk")} ${navBtn("waivers", "Waivers")} ${navBtn("league", "League")} ${navBtn("admin", "Admin")}</nav><div class="sideCard"><div class="mini">Front Office Score</div><div class="big">${frontOfficeScore()}</div><p>${frontOfficeNote()}</p></div></aside><main class="main">${topbar()}${content()}${modalHtml()}</main></div>`;
 }
 function navBtn(id, label) {
   return `<button data-tab="${id}" class="${tab === id ? "active" : ""}"><span>${label}</span><b>${navBadge(id)}</b></button>`;
@@ -187,6 +190,7 @@ function topbar() {
     waivers: "Waiver Wire",
     league: "League Overview",
     offseason: "Offseason",
+    admin: "Admin · Custom Rookies",
   };
   const title = S.offseason ? "Offseason " + S.year : titles[tab];
   const sub = S.offseason
@@ -204,6 +208,7 @@ function content() {
     trades: trades(),
     waivers: waivers(),
     league: league(),
+    admin: adminView(),
   }[tab];
 }
 function kpis() {
@@ -1040,6 +1045,9 @@ function bind() {
     .querySelectorAll("[data-pick-rookie]")
     .forEach((b) => (b.onclick = () => userPickRookie(b.dataset.pickRookie)));
   document
+    .querySelectorAll("[data-rm-rookie]")
+    .forEach((b) => (b.onclick = () => removeCustomRookie(b.dataset.rmRookie)));
+  document
     .querySelectorAll("[data-waive]")
     .forEach((b) => (b.onclick = () => waivePlayer(b.dataset.waive)));
   document
@@ -1166,6 +1174,7 @@ function actions(a) {
   if (a === "enterOffseason") enterOffseason();
   if (a === "advanceToDraft") advanceToDraft();
   if (a === "startNextSeason") startNextSeason();
+  if (a === "addCustomRookie") addCustomRookie();
 }
 function draftPlayer(id) {
   const team = S.teams.find((t) => t.players.some((p) => p.id === id));
@@ -1549,9 +1558,10 @@ function enterOffseason() {
     S.year === 2026
       ? clone(DATA.rookieClass2027)
       : generateRookieClass(upcomingYear);
-  const extras =
+  const dataExtras =
     (DATA.rookieClassExtras && DATA.rookieClassExtras[upcomingYear]) || [];
-  const rookieClass = base.concat(clone(extras));
+  const userExtras = (S.customRookies && S.customRookies[upcomingYear]) || [];
+  const rookieClass = base.concat(clone(dataExtras)).concat(clone(userExtras));
   const draftOrder = standingsRows()
     .slice()
     .reverse()
@@ -1759,5 +1769,117 @@ function offseasonDoneView() {
     .join(
       "",
     )}</div><div class="actions" style="margin-top:18px"><button class="btn" data-action="startNextSeason">Start ${S.year + 1} Season</button></div></div></section>`;
+}
+
+// =================== ADMIN: custom rookies =====================
+const ARCHETYPE_OPTIONS = [
+  "star",
+  "engine",
+  "creator",
+  "scorer",
+  "playmaker",
+  "shooter",
+  "defender",
+  "twoWay",
+  "anchor",
+  "forward",
+  "spark",
+  "prospect",
+];
+const POSITION_OPTIONS = ["G", "G/F", "F", "F/C", "C"];
+const RATING_KEYS = [
+  "scoring",
+  "shooting",
+  "playmaking",
+  "defense",
+  "rebounding",
+  "athleticism",
+  "iq",
+  "potential",
+];
+function adminView() {
+  const nextYear = S.year + 1;
+  const years = Object.keys(S.customRookies || {}).sort();
+  const ratingFields = RATING_KEYS.map(
+    (k) =>
+      `<div class="field"><label>${k}</label><input id="cr-${k}" type="number" value="70" min="30" max="99"></div>`,
+  ).join("");
+  const list =
+    years.length === 0
+      ? '<div class="empty">No custom rookies yet. Add one above.</div>'
+      : years
+          .map(
+            (y) =>
+              `<div class="logItem"><b>${y} Class</b> <span class="pill">${S.customRookies[y].length} player(s)</span>${S.customRookies[
+                y
+              ]
+                .map(
+                  (r, i) =>
+                    `<div class="checkRow"><div><b>${r.name}</b> <span class="pill">${r.pos}</span> <span class="pill">${r.archetype}</span><div class="mini">${r.team} · ${shortMoney(r.salary)} · upside ${r.ratings.potential}</div></div><button class="btn danger" data-rm-rookie="${y}|${i}">Remove</button></div>`,
+                )
+                .join("")}</div>`,
+          )
+          .join("");
+  return `<section class="card"><div class="sectionTitle"><h3>Add Custom Rookie</h3><span>Players added here join the named class for their draft year</span></div><div class="cardPad"><div class="layout2"><div><div class="field"><label>Name</label><input id="cr-name" placeholder="Player Name"></div><div class="field"><label>Position</label><select id="cr-pos">${POSITION_OPTIONS.map((p) => `<option value="${p}">${p}</option>`).join("")}</select></div><div class="field"><label>College / Origin</label><input id="cr-college" placeholder="UConn"></div><div class="field"><label>Draft Year</label><input id="cr-year" type="number" value="${nextYear}" min="${nextYear}"></div><div class="field"><label>Archetype</label><select id="cr-arch">${ARCHETYPE_OPTIONS.map((a) => `<option value="${a}">${a}</option>`).join("")}</select></div><div class="field"><label>Salary ($)</label><input id="cr-salary" type="number" value="400000" min="80000" step="10000"></div><div class="field"><label>Contract Years</label><input id="cr-years" type="number" value="4" min="1" max="4"></div></div><div><div class="ratingGrid">${ratingFields}</div><div class="field"><label>Scouting (optional)</label><textarea id="cr-scouting" rows="2" placeholder="Auto-filled from archetype if blank"></textarea></div><div class="field"><label>Strengths (optional)</label><input id="cr-strengths" placeholder="Auto-derived from top ratings if blank"></div><div class="field"><label>Weaknesses (optional)</label><input id="cr-weaknesses" placeholder="Auto-derived from low ratings if blank"></div><div class="actions"><button class="btn" data-action="addCustomRookie">Add to Draft Class</button></div></div></div><hr style="border:0;border-top:1px solid var(--line);margin:24px 0"><h3>Current Custom Rookies</h3>${list}</div></section>`;
+}
+function readField(id) {
+  const el = document.getElementById(id);
+  return el ? el.value : "";
+}
+function addCustomRookie() {
+  const name = readField("cr-name").trim();
+  if (!name) return toast("Name is required.");
+  const pos = readField("cr-pos");
+  const college = readField("cr-college").trim() || "Free Agent";
+  const year = parseInt(readField("cr-year"), 10);
+  if (!year || year < S.year + 1)
+    return toast(`Draft year must be ${S.year + 1} or later.`);
+  const archetype = readField("cr-arch");
+  const salary = Math.max(80000, parseInt(readField("cr-salary"), 10) || 0);
+  const years = Math.max(
+    1,
+    Math.min(4, parseInt(readField("cr-years"), 10) || 4),
+  );
+  const ratings = {};
+  RATING_KEYS.forEach(
+    (k) => (ratings[k] = clampRating(parseInt(readField("cr-" + k), 10) || 60)),
+  );
+  const scouting =
+    readField("cr-scouting").trim() || rookieScout(archetype, pos);
+  const strengths = readField("cr-strengths").trim() || ratingsTop(ratings);
+  const weaknesses =
+    readField("cr-weaknesses").trim() || ratingsBottom(ratings);
+  const id = "custom-" + year + "-" + slug(name + "-" + college);
+  if (!S.customRookies[year]) S.customRookies[year] = [];
+  if (S.customRookies[year].some((r) => r.id === id))
+    return toast(`${name} is already in the ${year} class.`);
+  S.customRookies[year].push({
+    id,
+    name,
+    pos,
+    team: college,
+    salary,
+    years,
+    scouting,
+    strengths,
+    weaknesses,
+    protected: false,
+    ratings,
+    archetype,
+    mood: 65,
+  });
+  save();
+  toast(`${name} added to ${year} draft class.`);
+  render();
+}
+function removeCustomRookie(key) {
+  const [yearStr, idxStr] = key.split("|");
+  const arr = S.customRookies[yearStr];
+  if (!arr) return;
+  const removed = arr.splice(parseInt(idxStr, 10), 1)[0];
+  if (arr.length === 0) delete S.customRookies[yearStr];
+  if (removed) toast(`${removed.name} removed from ${yearStr} class.`);
+  save();
+  render();
 }
 render();
