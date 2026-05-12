@@ -38,6 +38,8 @@ function freshState() {
     waived: [],
     picks: { you: 3, league: 2 },
     season: null,
+    year: 2026,
+    offseason: null,
     log: [],
     objectives: [
       { id: "roster11", text: "Draft at least 11 players", done: false },
@@ -56,9 +58,15 @@ function freshState() {
     reports: [],
   };
 }
+function migrate(s) {
+  if (!s) return s;
+  if (typeof s.year !== "number") s.year = 2026;
+  if (s.offseason === undefined) s.offseason = null;
+  return s;
+}
 function load() {
   try {
-    return JSON.parse(localStorage.getItem(LS_KEY));
+    return migrate(JSON.parse(localStorage.getItem(LS_KEY)));
   } catch {
     return null;
   }
@@ -178,10 +186,16 @@ function topbar() {
     trades: "Trade Desk",
     waivers: "Waiver Wire",
     league: "League Overview",
+    offseason: "Offseason",
   };
-  return `<div class="topbar"><div><h2>${titles[tab]}</h2><p>${S.phase} · Week ${S.week} · Simplified cap ${money(DATA.cap)}</p></div><div class="actions"><button class="btn secondary" data-action="advance">Advance Week</button><button class="btn secondary" data-action="simNext">Sim Next Game</button><button class="btn secondary" data-action="reset">New Save</button></div></div>`;
+  const title = S.offseason ? "Offseason " + S.year : titles[tab];
+  const sub = S.offseason
+    ? `Stage: ${S.offseason.stage === "aging" ? "Aging report" : S.offseason.stage === "draft" ? "Rookie draft" : "Complete"} · Year ${S.year} → ${S.year + 1}`
+    : `${S.phase} · Year ${S.year} · Week ${S.week} · Simplified cap ${money(DATA.cap)}`;
+  return `<div class="topbar"><div><h2>${title}</h2><p>${sub}</p></div><div class="actions"><button class="btn secondary" data-action="advance">Advance Week</button><button class="btn secondary" data-action="simNext">Sim Next Game</button><button class="btn secondary" data-action="reset">New Save</button></div></div>`;
 }
 function content() {
+  if (S.offseason) return offseasonView();
   return {
     dashboard: dashboard(),
     draft: draft(),
@@ -892,7 +906,15 @@ function schedulePage() {
   ensureSeason();
   const userRec = seasonRecord(S.team.abbr);
   const next = nextUnplayed();
-  return `${seasonKpis()}<div class="layout2"><section class="card"><div class="sectionTitle"><h3>Schedule</h3><span>${S.season.schedule.filter((g) => g.played).length}/${S.season.schedule.length} games final</span></div><div class="cardPad actions"><button class="btn" data-action="simNext">Sim Next Game</button><button class="btn secondary" data-action="simWeek">Sim Current Week</button><button class="btn secondary" data-action="simSeason">Sim Season</button><button class="btn ghost" data-action="regenSchedule">Regenerate Schedule</button></div><div class="scheduleList">${S.season.schedule.map(gameRow).join("")}</div></section><section class="card"><div class="sectionTitle"><h3>Standings</h3><span>Your record ${userRec.w}-${userRec.l}</span></div>${standingsTable()}<div class="sectionTitle"><h3>Recent Finals</h3><span>box-score summaries</span></div><div class="cardPad log">${recentResults()}</div></section></div>`;
+  const allDone = S.season.schedule.every((g) => g.played);
+  const offseasonBtn = allDone
+    ? '<button class="btn" data-action="enterOffseason">Advance to Offseason →</button>'
+    : "";
+  const simBtns = allDone
+    ? offseasonBtn +
+      '<button class="btn ghost" data-action="regenSchedule">Regenerate Schedule</button>'
+    : `<button class="btn" data-action="simNext">Sim Next Game</button><button class="btn secondary" data-action="simWeek">Sim Current Week</button><button class="btn secondary" data-action="simSeason">Sim Season</button><button class="btn ghost" data-action="regenSchedule">Regenerate Schedule</button>`;
+  return `${seasonKpis()}<div class="layout2"><section class="card"><div class="sectionTitle"><h3>Schedule</h3><span>${S.season.schedule.filter((g) => g.played).length}/${S.season.schedule.length} games final</span></div><div class="cardPad actions">${simBtns}</div><div class="scheduleList">${S.season.schedule.map(gameRow).join("")}</div></section><section class="card"><div class="sectionTitle"><h3>Standings</h3><span>Your record ${userRec.w}-${userRec.l}</span></div>${standingsTable()}<div class="sectionTitle"><h3>Recent Finals</h3><span>box-score summaries</span></div><div class="cardPad log">${recentResults()}</div></section></div>`;
 }
 function seasonKpis() {
   const r = seasonRecord(S.team.abbr);
@@ -1014,6 +1036,9 @@ function bind() {
   document
     .querySelectorAll("[data-draft]")
     .forEach((b) => (b.onclick = () => draftPlayer(b.dataset.draft)));
+  document
+    .querySelectorAll("[data-pick-rookie]")
+    .forEach((b) => (b.onclick = () => userPickRookie(b.dataset.pickRookie)));
   document
     .querySelectorAll("[data-waive]")
     .forEach((b) => (b.onclick = () => waivePlayer(b.dataset.waive)));
@@ -1138,6 +1163,9 @@ function actions(a) {
     render();
   }
   if (a === "submitTrade") submitTrade();
+  if (a === "enterOffseason") enterOffseason();
+  if (a === "advanceToDraft") advanceToDraft();
+  if (a === "startNextSeason") startNextSeason();
 }
 function draftPlayer(id) {
   const team = S.teams.find((t) => t.players.some((p) => p.id === id));
@@ -1225,5 +1253,507 @@ function marketChurn() {
       );
     }),
   );
+}
+
+// =================== OFFSEASON: aging + rookie draft =====================
+function pickOne(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+function pickN(arr, n) {
+  const copy = arr.slice(),
+    out = [];
+  while (out.length < n && copy.length) {
+    out.push(copy.splice(Math.floor(Math.random() * copy.length), 1)[0]);
+  }
+  return out;
+}
+function clampRating(v) {
+  return Math.max(35, Math.min(99, Math.round(v)));
+}
+const AGING_RATINGS = [
+  "scoring",
+  "shooting",
+  "playmaking",
+  "defense",
+  "rebounding",
+  "athleticism",
+  "iq",
+];
+function ageOnePlayer(p) {
+  const before = composite(p);
+  const delta = p.ratings.potential - before;
+  const deltas = {};
+  if (delta > 10) {
+    pickN(AGING_RATINGS, 3).forEach((k) => {
+      const bump = rand(1, 3);
+      const next = clampRating(p.ratings[k] + bump);
+      if (next !== p.ratings[k]) {
+        deltas[k] = next - p.ratings[k];
+        p.ratings[k] = next;
+      }
+    });
+  } else if (delta < -6) {
+    pickN(AGING_RATINGS, 2).forEach((k) => {
+      const drop = rand(1, 2);
+      const next = clampRating(p.ratings[k] - drop);
+      if (next !== p.ratings[k]) {
+        deltas[k] = next - p.ratings[k];
+        p.ratings[k] = next;
+      }
+    });
+    p.ratings.potential = Math.max(40, p.ratings.potential - 2);
+  } else {
+    const k = pickOne(AGING_RATINGS);
+    const drift = rand(-1, 1);
+    if (drift) {
+      const next = clampRating(p.ratings[k] + drift);
+      if (next !== p.ratings[k]) {
+        deltas[k] = next - p.ratings[k];
+        p.ratings[k] = next;
+      }
+    }
+  }
+  p.years = Math.max(0, p.years - 1);
+  return { name: p.name, team: p.team, before, after: composite(p), deltas };
+}
+function applyOffseasonAging() {
+  const reports = [];
+  S.roster.forEach((p) => {
+    const r = ageOnePlayer(p);
+    r.isUser = true;
+    reports.push(r);
+  });
+  S.teams.forEach((t) =>
+    t.players.forEach((p) => {
+      reports.push(ageOnePlayer(p));
+    }),
+  );
+  return reports;
+}
+const PROC_FIRST = [
+  "Maya",
+  "Aria",
+  "Layla",
+  "Sienna",
+  "Zoe",
+  "Olivia",
+  "Camille",
+  "Aaliyah",
+  "Brooklyn",
+  "Jordan",
+  "Talia",
+  "Kaela",
+  "Nia",
+  "Quinn",
+  "Sophia",
+  "Riley",
+  "Imani",
+  "Tessa",
+  "Hailey",
+  "Reese",
+  "Mariah",
+  "Vanessa",
+  "Sydney",
+  "Brielle",
+  "Naya",
+  "Asha",
+  "Kaylee",
+  "Mackenzie",
+  "Skyla",
+  "Jasmine",
+  "Skylar",
+  "Jada",
+  "Amara",
+  "Selah",
+  "Aubree",
+  "Kaia",
+  "Mia",
+  "Briana",
+  "Mavis",
+  "Kai",
+];
+const PROC_LAST = [
+  "Carter",
+  "Brooks",
+  "Hill",
+  "Jones",
+  "Reed",
+  "Cole",
+  "Hayes",
+  "Bennett",
+  "Foster",
+  "Wright",
+  "Rivera",
+  "Patel",
+  "Nguyen",
+  "Adams",
+  "Reyes",
+  "Coleman",
+  "Spencer",
+  "Watts",
+  "Bowman",
+  "Castillo",
+  "Rhodes",
+  "Vega",
+  "Marsh",
+  "Sutton",
+  "Lyon",
+  "Park",
+  "Bell",
+  "Wagner",
+  "Pham",
+  "Olsen",
+  "Harper",
+  "Sloan",
+  "Frazier",
+  "Burke",
+  "Greer",
+  "Mason",
+  "Ruiz",
+  "Dwyer",
+  "Holland",
+  "Estrada",
+];
+const PROC_COLLEGES = [
+  "UConn",
+  "South Carolina",
+  "Stanford",
+  "LSU",
+  "Notre Dame",
+  "Texas",
+  "Iowa State",
+  "UCLA",
+  "USC",
+  "Baylor",
+  "Duke",
+  "NC State",
+  "Maryland",
+  "Tennessee",
+  "Ohio State",
+  "Florida",
+  "Oregon",
+  "Kansas",
+  "Mississippi State",
+  "Louisville",
+];
+const PROC_POSITIONS = ["G", "G", "G", "G/F", "F", "F", "C", "F/C"];
+function generateRookieClass(year) {
+  const tiers = [
+    { count: 1, base: [82, 88], pot: [92, 97], arch: "star" },
+    { count: 3, base: [73, 82], pot: [85, 92], arch: "starter" },
+    { count: 5, base: [64, 74], pot: [78, 88], arch: "starter" },
+    { count: 5, base: [55, 66], pot: [70, 82], arch: "prospect" },
+  ];
+  const used = new Set();
+  const out = [];
+  let pickNo = 0;
+  for (const t of tiers) {
+    for (let i = 0; i < t.count; i++) {
+      let name;
+      do {
+        name = `${pickOne(PROC_FIRST)} ${pickOne(PROC_LAST)}`;
+      } while (used.has(name));
+      used.add(name);
+      const pos = pickOne(PROC_POSITIONS);
+      const isC = pos.includes("C");
+      const isG = pos.startsWith("G");
+      const base = rand(t.base[0], t.base[1]);
+      const pot = rand(Math.max(base + 2, t.pot[0]), t.pot[1]);
+      const ratings = {
+        scoring: clampRating(base + rand(-8, 10)),
+        shooting: clampRating(base + rand(-12, 8) - (isC ? 8 : 0)),
+        playmaking: clampRating(
+          base + rand(-15, 8) - (isC ? 10 : 0) + (isG ? 6 : 0),
+        ),
+        defense: clampRating(base + rand(-12, 10)),
+        rebounding: clampRating(base + rand(-15, 12) + (isC ? 10 : 0)),
+        athleticism: clampRating(base + rand(-5, 12)),
+        iq: clampRating(base + rand(-5, 12)),
+        potential: pot,
+      };
+      const salary =
+        200000 +
+        (t.arch === "star" ? 500000 : t.arch === "starter" ? 250000 : 0) +
+        rand(0, 80000);
+      out.push({
+        id: `rookie-${year}-${pickNo++}`,
+        name,
+        pos,
+        team: pickOne(PROC_COLLEGES),
+        salary,
+        years: 4,
+        scouting: rookieScout(t.arch, pos),
+        strengths: ratingsTop(ratings),
+        weaknesses: ratingsBottom(ratings),
+        protected: false,
+        ratings,
+        archetype: t.arch,
+        mood: 60 + Math.floor(Math.random() * 25),
+      });
+    }
+  }
+  return out;
+}
+function rookieScout(arch, pos) {
+  if (arch === "star")
+    return "Generational prospect with All-Star projection; expected day-one impact.";
+  if (arch === "starter" && pos.includes("G"))
+    return "Pro-ready guard with multi-year starter projection.";
+  if (arch === "starter" && pos.includes("C"))
+    return "Refined interior player with starting big projection.";
+  if (arch === "starter")
+    return "Versatile forward with starting-caliber tools.";
+  return "Developmental prospect with carve-out role upside.";
+}
+const RATING_LABELS_HIGH = {
+  scoring: "Scoring",
+  shooting: "Shooting",
+  playmaking: "Playmaking",
+  defense: "Defense",
+  rebounding: "Rebounding",
+  athleticism: "Athleticism",
+  iq: "Feel",
+};
+const RATING_LABELS_LOW = {
+  scoring: "Scoring volume",
+  shooting: "Range",
+  playmaking: "Passing reads",
+  defense: "Defensive engagement",
+  rebounding: "Glass work",
+  athleticism: "Burst",
+  iq: "Decision speed",
+};
+function ratingsTop(r) {
+  return Object.entries(r)
+    .filter(([k]) => RATING_LABELS_HIGH[k])
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([k]) => RATING_LABELS_HIGH[k])
+    .join(", ");
+}
+function ratingsBottom(r) {
+  return Object.entries(r)
+    .filter(([k]) => RATING_LABELS_LOW[k])
+    .sort((a, b) => a[1] - b[1])
+    .slice(0, 3)
+    .map(([k]) => RATING_LABELS_LOW[k])
+    .join(", ");
+}
+function enterOffseason() {
+  if (S.season && S.season.schedule.some((g) => !g.played)) {
+    return toast("Finish all games before advancing to the offseason.");
+  }
+  const reports = applyOffseasonAging();
+  const rookieClass =
+    S.year === 2026
+      ? clone(DATA.rookieClass2027)
+      : generateRookieClass(S.year + 1);
+  const draftOrder = standingsRows()
+    .slice()
+    .reverse()
+    .map((r) => r.id)
+    .slice(0, rookieClass.length);
+  S.offseason = {
+    stage: "aging",
+    agingReport: reports,
+    rookieClass,
+    draftOrder,
+    picks: [],
+    currentPickIdx: 0,
+  };
+  tab = "offseason";
+  addLog(
+    "Offseason opened",
+    `Season ${S.year} closed. Aging applied to ${reports.length} players league-wide.`,
+  );
+  save();
+  render();
+}
+function advanceToDraft() {
+  if (!S.offseason || S.offseason.stage !== "aging") return;
+  S.offseason.stage = "draft";
+  save();
+  render();
+  setTimeout(processAiPicks, 250);
+}
+function processAiPicks() {
+  if (!S.offseason || S.offseason.stage !== "draft") return;
+  let pickedAny = false;
+  while (S.offseason.currentPickIdx < S.offseason.draftOrder.length) {
+    const teamId = S.offseason.draftOrder[S.offseason.currentPickIdx];
+    if (teamId === S.team.abbr) break;
+    const available = S.offseason.rookieClass.filter(
+      (p) => !S.offseason.picks.some((pk) => pk.playerId === p.id),
+    );
+    const chosen = aiPickRookie(teamId, available);
+    if (!chosen) break;
+    S.offseason.picks.push({
+      team: teamId,
+      playerId: chosen.id,
+      pickNo: S.offseason.currentPickIdx + 1,
+    });
+    const tm = S.teams.find((t) => t.id === teamId);
+    if (tm) {
+      const r = clone(chosen);
+      r.team = teamId;
+      tm.players.push(r);
+    }
+    S.offseason.currentPickIdx++;
+    pickedAny = true;
+  }
+  if (S.offseason.currentPickIdx >= S.offseason.draftOrder.length) {
+    S.offseason.stage = "done";
+  }
+  if (pickedAny || S.offseason.stage === "done") {
+    save();
+    render();
+  }
+}
+function aiPickRookie(teamId, available) {
+  if (!available.length) return null;
+  return available
+    .slice()
+    .sort(
+      (a, b) =>
+        composite(b) +
+        b.ratings.potential * 0.6 -
+        (composite(a) + a.ratings.potential * 0.6),
+    )[0];
+}
+function userPickRookie(playerId) {
+  if (!S.offseason || S.offseason.stage !== "draft") return;
+  if (S.offseason.draftOrder[S.offseason.currentPickIdx] !== S.team.abbr)
+    return toast("Not your pick.");
+  const p = S.offseason.rookieClass.find((x) => x.id === playerId);
+  if (!p || S.offseason.picks.some((pk) => pk.playerId === playerId)) return;
+  S.offseason.picks.push({
+    team: S.team.abbr,
+    playerId: p.id,
+    pickNo: S.offseason.currentPickIdx + 1,
+  });
+  const r = clone(p);
+  r.team = S.team.abbr;
+  S.roster.push(r);
+  addLog(
+    "Rookie drafted",
+    `${S.team.nickname} selected ${p.name} (${p.pos}, ${p.team}) with pick #${S.offseason.currentPickIdx + 1}.`,
+  );
+  S.offseason.currentPickIdx++;
+  save();
+  render();
+  setTimeout(processAiPicks, 200);
+}
+function startNextSeason() {
+  if (!S.offseason || S.offseason.stage !== "done") return;
+  S.year++;
+  S.season = null;
+  ensureSeason(true);
+  S.offseason = null;
+  tab = "schedule";
+  addLog(
+    "New season begins",
+    `Year ${S.year} schedule generated. Roster carries over with offseason changes baked in.`,
+  );
+  save();
+  render();
+}
+function offseasonView() {
+  if (!S.offseason) return '<div class="empty">No offseason in progress.</div>';
+  if (S.offseason.stage === "aging") return offseasonAgingView();
+  if (S.offseason.stage === "draft") return offseasonDraftView();
+  return offseasonDoneView();
+}
+function offseasonAgingView() {
+  const userReports = S.offseason.agingReport.filter((r) => r.isUser);
+  const sortByImpact = (r) =>
+    Math.abs(r.after - r.before) +
+    Object.values(r.deltas).reduce((s, v) => s + Math.abs(v), 0);
+  const leagueChangers = S.offseason.agingReport
+    .filter((r) => !r.isUser)
+    .slice()
+    .sort((a, b) => sortByImpact(b) - sortByImpact(a))
+    .slice(0, 12);
+  const row = (r) => {
+    const total = r.after - r.before;
+    const arrow =
+      total > 0
+        ? `<span class="pill good">↑ ${total}</span>`
+        : total < 0
+          ? `<span class="pill bad">↓ ${Math.abs(total)}</span>`
+          : '<span class="pill">·</span>';
+    const ds = Object.entries(r.deltas)
+      .map(([k, v]) => `<span class="tag">${k} ${v > 0 ? "+" + v : v}</span>`)
+      .join("");
+    return `<tr><td><b>${r.name}</b></td><td><span class="pill">${r.team}</span></td><td>${arrow}</td><td>${ds || '<span class="mini">no change</span>'}</td></tr>`;
+  };
+  return `<section class="card"><div class="sectionTitle"><h3>Year ${S.year} · Offseason Aging Report</h3><span>Year ${S.year + 1} rookie class is next</span></div><div class="cardPad"><h3>Your Roster</h3><table class="table"><thead><tr><th>Player</th><th>Team</th><th>Composite</th><th>Notable shifts</th></tr></thead><tbody>${userReports.map(row).join("") || '<tr><td colspan="4"><div class="empty">No roster players to age.</div></td></tr>'}</tbody></table><h3 style="margin-top:18px">Notable League Changes</h3><table class="table"><thead><tr><th>Player</th><th>Team</th><th>Composite</th><th>Notable shifts</th></tr></thead><tbody>${leagueChangers.map(row).join("")}</tbody></table><div class="actions" style="margin-top:18px"><button class="btn" data-action="advanceToDraft">Continue to Rookie Draft</button></div></div></section>`;
+}
+function offseasonDraftView() {
+  const os = S.offseason;
+  const onClock = os.draftOrder[os.currentPickIdx];
+  const userOnClock = onClock === S.team.abbr;
+  const onClockMeta = userOnClock
+    ? {
+        id: S.team.abbr,
+        name: S.team.city + " " + S.team.nickname,
+        primary: S.team.primary,
+      }
+    : S.teams.find((t) => t.id === onClock) || {
+        id: onClock,
+        name: onClock,
+        primary: "#888",
+      };
+  const pickedIds = new Set(os.picks.map((p) => p.playerId));
+  const available = os.rookieClass
+    .filter((p) => !pickedIds.has(p.id))
+    .sort(
+      (a, b) =>
+        composite(b) +
+        b.ratings.potential * 0.5 -
+        (composite(a) + a.ratings.potential * 0.5),
+    );
+  const orderHtml = os.draftOrder
+    .map((id, i) => {
+      const picked = os.picks[i];
+      const meta =
+        id === S.team.abbr
+          ? { name: S.team.nickname, primary: S.team.primary }
+          : S.teams.find((t) => t.id === id) || {
+              name: id,
+              primary: "#888",
+            };
+      const player = picked
+        ? os.rookieClass.find((p) => p.id === picked.playerId)
+        : null;
+      const isUser = id === S.team.abbr;
+      return `<div class="logItem" style="${i === os.currentPickIdx ? "border-color:var(--orange);background:#fff6ee" : ""}${isUser && !picked ? ";box-shadow:inset 4px 0 0 var(--orange)" : ""}"><b>Pick #${i + 1}</b> <span class="teamBadge" style="background:${meta.primary}">${id}</span> ${meta.name}${isUser ? ' <span class="pill good">YOU</span>' : ""}${player ? `<div class="mini">→ ${player.name} · ${player.pos} · ${player.team}</div>` : i === os.currentPickIdx ? '<div class="mini">on the clock</div>' : '<div class="mini">upcoming</div>'}</div>`;
+    })
+    .join("");
+  const board = available
+    .map((p) => {
+      const photo = portraitHtml(p);
+      return `<div class="playerCard">${photo}<div><div><span class="playerName">${p.name}</span> <span class="pill">${p.pos}</span> <span class="pill">${p.team}</span></div><div class="scout">${p.scouting}</div><div class="tags"><span class="tag">${visibleGrade(p)}</span><span class="tag">Upside ${p.ratings.potential}</span><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${p.strengths.split(",")[0]}</span></div></div><div class="actions"><button class="btn secondary" data-view="${p.id}">Scout</button><button class="btn ${userOnClock ? "" : "secondary"}" ${userOnClock ? "" : "disabled"} data-pick-rookie="${p.id}">${userOnClock ? "Draft" : "Wait"}</button></div></div>`;
+    })
+    .join("");
+  return `<section class="card"><div class="sectionTitle"><h3>Rookie Draft · Year ${S.year + 1} Class</h3><span>${os.picks.length}/${os.draftOrder.length} picks made</span></div><div class="layout2"><div><div class="sectionTitle"><h3>On the Clock</h3><span><span class="teamBadge" style="background:${onClockMeta.primary}">${onClock}</span>${onClockMeta.name}${userOnClock ? " · YOUR PICK" : ""}</span></div><div class="board" style="max-height:720px">${board || '<div class="empty">Draft complete.</div>'}</div></div><div><div class="sectionTitle"><h3>Draft Order</h3><span>worst → best</span></div><div class="cardPad log" style="max-height:720px;overflow:auto">${orderHtml}</div></div></div></section>`;
+}
+function offseasonDoneView() {
+  const os = S.offseason;
+  const userPick = os.picks.find((p) => p.team === S.team.abbr);
+  const userRookie = userPick
+    ? os.rookieClass.find((r) => r.id === userPick.playerId)
+    : null;
+  const top5 = os.picks
+    .slice()
+    .sort((a, b) => a.pickNo - b.pickNo)
+    .slice(0, 5);
+  return `<section class="card"><div class="sectionTitle"><h3>Year ${S.year} Offseason Complete</h3><span>${os.picks.length} rookies drafted league-wide</span></div><div class="cardPad"><div class="logItem"><b>Your selection</b><p class="muted">${userRookie ? `You took ${userRookie.name} (${userRookie.pos}, ${userRookie.team}) at pick #${userPick.pickNo}. Welcome to the franchise.` : "You did not have a pick in this draft (you finished in the top 2 last season)."}</p></div><h3>Top 5 picks recap</h3><div class="log">${top5
+    .map((pk) => {
+      const r = os.rookieClass.find((x) => x.id === pk.playerId);
+      return `<div class="logItem"><b>#${pk.pickNo} · ${pk.team}</b><div class="mini">${r.name} · ${r.pos} · ${r.team} · ${visibleGrade(r)}</div></div>`;
+    })
+    .join(
+      "",
+    )}</div><div class="actions" style="margin-top:18px"><button class="btn" data-action="startNextSeason">Start ${S.year + 1} Season</button></div></div></section>`;
 }
 render();
