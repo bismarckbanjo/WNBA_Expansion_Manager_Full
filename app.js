@@ -280,10 +280,27 @@ function topbar() {
   const sub = S.offseason
     ? `Stage: ${S.offseason.stage === "aging" ? "Aging report" : S.offseason.stage === "draft" ? "Rookie draft" : "Complete"} · Year ${S.year} → ${S.year + 1}`
     : `${S.phase} · Year ${S.year} · Week ${S.week} · Simplified cap ${money(DATA.cap)}`;
-  return `<div class="topbar"><div><h2>${title}</h2><p>${sub}</p></div><div class="actions"><button class="btn secondary" data-action="simNext">Play Next Game →</button><button class="btn secondary" data-action="reset">New Save</button></div></div>`;
+  // Hide the topbar "Play Next Game" when the main pane already has a primary
+  // action button (Game Day / post-game / offseason / awards) — avoids two
+  // conflicting "advance" buttons that confused the flow.
+  const hidePlayBtn =
+    S.gameDay ||
+    S.postGame ||
+    S.offseason ||
+    S.pendingAwards ||
+    (S.playoffs && S.playoffs.complete) ||
+    !S.started ||
+    !S.season;
+  const playBtn = hidePlayBtn
+    ? ""
+    : `<button class="btn secondary" data-action="simNext">Play Next Game →</button>`;
+  return `<div class="topbar"><div><h2>${title}</h2><p>${sub}</p></div><div class="actions">${playBtn}<button class="btn secondary" data-action="reset">New Save</button></div></div>`;
 }
 function content() {
-  if (S.offseason) return offseasonView();
+  // Offseason takes over only the Schedule tab so the user can still navigate
+  // to Roster, Trades, Coaching, etc. while in the aging / rookie draft flow.
+  if (S.offseason && tab === "schedule") return offseasonView();
+  if (S.offseason && tab === "offseason") return offseasonView();
   if (tab === "awards" && S.pendingAwards) return awardsView();
   if (S.postGame && tab === "schedule") return postGameView();
   if (S.gameDay && tab === "schedule") return gameDayView();
@@ -1468,9 +1485,12 @@ function gradeRow(k, v) {
   return `<div class="meter"><span>${k[0].toUpperCase() + k.slice(1)}</span><div class="bar"><i style="width:${v}%"></i></div><b>${v >= 90 ? "Elite" : v >= 80 ? "Plus" : v >= 70 ? "Solid" : v >= 60 ? "Playable" : "Risk"}</b></div>`;
 }
 function findPlayer(id) {
+  const offRookies =
+    S.offseason && S.offseason.rookieClass ? S.offseason.rookieClass : [];
   return S.roster
     .concat(allLeaguePlayers())
     .concat(waiverPool())
+    .concat(offRookies)
     .find((p) => p.id === id);
 }
 function bind() {
