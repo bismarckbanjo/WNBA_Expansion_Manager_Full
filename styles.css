@@ -579,15 +579,15 @@ button {
   color: var(--muted);
 }
 .portrait {
-  width: 44px;
-  height: 44px;
+  width: 60px;
+  height: 60px;
   border-radius: 50%;
   background: linear-gradient(135deg, #2a201b, #4a352a);
   color: #fff;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 13px;
+  font-size: 16px;
   font-weight: 800;
   letter-spacing: 0.02em;
   position: relative;
@@ -605,16 +605,16 @@ button {
   object-position: center 18%;
 }
 .portrait.lg {
-  width: 84px;
-  height: 84px;
-  font-size: 24px;
+  width: 140px;
+  height: 140px;
+  font-size: 38px;
   border-width: 3px;
 }
 .portrait.sm {
-  width: 32px;
-  height: 32px;
-  font-size: 11px;
-  border-width: 1.5px;
+  width: 42px;
+  height: 42px;
+  font-size: 13px;
+  border-width: 2px;
 }
 .playerCard {
   display: grid;
