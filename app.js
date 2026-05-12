@@ -49,6 +49,7 @@ function freshState() {
       pendingPress: null,
       pressLog: [],
     },
+    gameDay: null,
     log: [],
     objectives: [
       { id: "roster11", text: "Draft at least 11 players", done: false },
@@ -83,6 +84,7 @@ function migrate(s) {
       pressLog: [],
     };
   }
+  if (s.gameDay === undefined) s.gameDay = null;
   // Ensure fatigue on every player record
   const ensureFatigue = (p) => {
     if (typeof p.fatigue !== "number") p.fatigue = 0;
@@ -227,6 +229,7 @@ function topbar() {
 }
 function content() {
   if (S.offseason) return offseasonView();
+  if (S.gameDay) return gameDayView();
   return {
     dashboard: dashboard(),
     draft: draft(),
@@ -949,12 +952,55 @@ function simulateGame(g) {
 function nextUnplayed() {
   return S.season.schedule.find((g) => !g.played);
 }
+function nextUserGame() {
+  if (!S.season) return null;
+  return S.season.schedule.find(
+    (g) => !g.played && (g.home === S.team.abbr || g.away === S.team.abbr),
+  );
+}
+// Fast-forward all NPC games chronologically up to (but not including) the user's next game,
+// then queue the user's game in S.gameDay so the Game Day view appears.
 function simNextGame() {
   ensureSeason();
-  const g = nextUnplayed();
-  if (!g) return toast("Season complete.");
+  const mine = nextUserGame();
+  if (!mine) {
+    // No user game left — sim any remaining NPC games sequentially.
+    const g = nextUnplayed();
+    if (!g) return toast("Season complete.");
+    simulateGame(g);
+    S.week = Math.max(S.week, g.week);
+    save();
+    return render();
+  }
+  // Auto-bracket: sim every unplayed NPC game scheduled before mine (by week, then position).
+  const mineIdx = S.season.schedule.indexOf(mine);
+  S.season.schedule.forEach((g, i) => {
+    if (g.played) return;
+    if (i >= mineIdx) return;
+    if (g.home === S.team.abbr || g.away === S.team.abbr) return; // safety
+    simulateGame(g);
+  });
+  S.week = Math.max(S.week, mine.week);
+  S.gameDay = { gameId: mine.id };
+  save();
+  render();
+}
+function playQueuedGame() {
+  if (!S.gameDay) return;
+  const g = S.season.schedule.find((x) => x.id === S.gameDay.gameId);
+  if (!g) {
+    S.gameDay = null;
+    save();
+    return render();
+  }
   simulateGame(g);
-  S.week = Math.max(S.week, g.week);
+  S.gameDay = null;
+  save();
+  render();
+}
+function closeGameDay() {
+  S.gameDay = null;
+  save();
   render();
 }
 function simWeek() {
@@ -997,16 +1043,94 @@ function standingsRows() {
 function schedulePage() {
   ensureSeason();
   const userRec = seasonRecord(S.team.abbr);
-  const next = nextUnplayed();
+  const myGames = userUpcomingGames(8);
+  const next = myGames[0];
   const allDone = S.season.schedule.every((g) => g.played);
   const offseasonBtn = allDone
     ? '<button class="btn" data-action="enterOffseason">Advance to Offseason →</button>'
     : "";
-  const simBtns = allDone
+  const heroBlock = next
+    ? nextGameHero(next)
+    : `<section class="card"><div class="cardPad"><h3>Season complete</h3><p class="muted">All games played. Move on to the offseason.</p>${offseasonBtn}</div></section>`;
+  const remaining = myGames.slice(1);
+  const myList = remaining.length
+    ? remaining.map(myGameCard).join("")
+    : '<div class="empty">No more games on your schedule.</div>';
+  const bulkSimBtns = allDone
     ? offseasonBtn +
       '<button class="btn ghost" data-action="regenSchedule">Regenerate Schedule</button>'
-    : `<button class="btn" data-action="simNext">Sim Next Game</button><button class="btn secondary" data-action="simWeek">Sim Current Week</button><button class="btn secondary" data-action="simSeason">Sim Season</button><button class="btn ghost" data-action="regenSchedule">Regenerate Schedule</button>`;
-  return `${seasonKpis()}<div class="layout2"><section class="card"><div class="sectionTitle"><h3>Schedule</h3><span>${S.season.schedule.filter((g) => g.played).length}/${S.season.schedule.length} games final</span></div><div class="cardPad actions">${simBtns}</div><div class="scheduleList">${S.season.schedule.map(gameRow).join("")}</div></section><section class="card"><div class="sectionTitle"><h3>Standings</h3><span>Your record ${userRec.w}-${userRec.l}</span></div>${standingsTable()}<div class="sectionTitle"><h3>Recent Finals</h3><span>box-score summaries</span></div><div class="cardPad log">${recentResults()}</div></section></div>`;
+    : `<button class="btn secondary" data-action="simWeek">Sim Current Week</button><button class="btn secondary" data-action="simSeason">Sim Rest of Season</button><button class="btn ghost" data-action="regenSchedule">Regenerate Schedule</button>`;
+  return `${seasonKpis()}${heroBlock}<div class="layout2"><section class="card"><div class="sectionTitle"><h3>My Upcoming Games</h3><span>${myGames.length} game(s) remaining</span></div><div class="cardPad log">${myList}</div></section><section class="card"><div class="sectionTitle"><h3>Standings</h3><span>You: ${userRec.w}-${userRec.l}</span></div>${standingsTable()}</section></div><section class="card" style="margin-top:18px"><div class="sectionTitle"><h3>League Schedule</h3><span>${S.season.schedule.filter((g) => g.played).length}/${S.season.schedule.length} games final</span></div><div class="cardPad actions">${bulkSimBtns}</div><details><summary class="cardPad" style="cursor:pointer;font-weight:800;border-top:1px solid var(--line)">Show full league schedule</summary><div class="scheduleList">${S.season.schedule.map(gameRow).join("")}</div></details></section><section class="card" style="margin-top:18px"><div class="sectionTitle"><h3>Recent Finals</h3><span>box-score summaries</span></div><div class="cardPad log">${recentResults()}</div></section>`;
+}
+function nextGameHero(g) {
+  const isHome = g.home === S.team.abbr;
+  const oppId = isHome ? g.away : g.home;
+  const opp = teamMeta(oppId);
+  const oppRec = seasonRecord(oppId);
+  const oppPower = teamPower(oppId);
+  const gp = (S.coaching.gamePlans && S.coaching.gamePlans[g.id]) || {
+    scouted: false,
+    plan: null,
+  };
+  const focusLabel = currentFocusLabel();
+  const scoutBlock = gp.scouted
+    ? `<div class="impact" style="margin-top:10px"><div class="impactRow"><span>Per O</span><div class="bar"><i style="width:${oppPower.perO}%"></i></div><b>${oppPower.perO}</b></div><div class="impactRow"><span>Per D</span><div class="bar"><i style="width:${oppPower.perD}%"></i></div><b>${oppPower.perD}</b></div><div class="impactRow"><span>Int O</span><div class="bar"><i style="width:${oppPower.intO}%"></i></div><b>${oppPower.intO}</b></div><div class="impactRow"><span>Int D</span><div class="bar"><i style="width:${oppPower.intD}%"></i></div><b>${oppPower.intD}</b></div></div><p class="muted" style="margin-top:8px">${oppPower.intO > oppPower.perO ? "Interior-heavy attack. Pack the Paint covers their best lane." : "Perimeter-driven offense. Extend Defense closes their shooters."}</p>`
+    : `<div style="margin-top:10px"><button class="btn secondary" data-scout="${g.id}">Scout Opponent</button></div>`;
+  const planBlock = gp.scouted
+    ? `<div class="actions" style="margin-top:10px"><button class="btn ${gp.plan === "pack" ? "" : "secondary"}" data-plan="${g.id}|pack">Pack the Paint</button><button class="btn ${gp.plan === "extend" ? "" : "secondary"}" data-plan="${g.id}|extend">Extend Defense</button>${gp.plan ? `<button class="btn ghost" data-plan="${g.id}|none">Clear plan</button>` : ""}</div>`
+    : "";
+  return `<section class="card" style="margin-bottom:18px"><div class="sectionTitle"><h3>Next Game · Week ${g.week} · ${isHome ? "vs" : "at"} ${opp.name}</h3><span>${opp.id} ${oppRec.w}-${oppRec.l}</span></div><div class="cardPad"><div class="layout2"><div><h3 style="margin:0">${isHome ? "Home" : "Road"} · ${opp.name}</h3><p class="muted">Plan: <b>${gp.plan === "pack" ? "Pack the Paint" : gp.plan === "extend" ? "Extend Defense" : "Not set"}</b> · Weekly focus: <b>${focusLabel}</b></p>${scoutBlock}${planBlock}</div><div class="actions" style="justify-content:flex-end;align-items:flex-end;flex-direction:column;gap:10px"><button class="btn" data-action="simNext" style="font-size:15px;padding:14px 18px">Game Day →</button><button class="btn secondary" data-action="simWeek">Sim Current Week (skip prep)</button></div></div></div></section>`;
+}
+function myGameCard(g) {
+  const isHome = g.home === S.team.abbr;
+  const oppId = isHome ? g.away : g.home;
+  const opp = teamMeta(oppId);
+  const oppRec = seasonRecord(oppId);
+  const gp = (S.coaching.gamePlans && S.coaching.gamePlans[g.id]) || {
+    scouted: false,
+    plan: null,
+  };
+  return `<div class="logItem"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px"><b>Week ${g.week} · ${isHome ? "vs" : "at"} <span class="teamBadge" style="background:${opp.primary}">${oppId}</span> ${opp.name}</b><span class="pill">${oppRec.w}-${oppRec.l}</span></div><div class="mini" style="margin-top:6px">${gp.scouted ? "Scouted" : "Unscouted"} · Plan: ${gp.plan === "pack" ? "Pack" : gp.plan === "extend" ? "Extend" : "—"}</div><div class="actions" style="margin-top:8px">${gp.scouted ? "" : `<button class="btn secondary" data-scout="${g.id}">Scout</button>`}<button class="btn ${gp.plan === "pack" ? "" : "secondary"}" data-plan="${g.id}|pack">Pack</button><button class="btn ${gp.plan === "extend" ? "" : "secondary"}" data-plan="${g.id}|extend">Extend</button></div></div>`;
+}
+function currentFocusLabel() {
+  const f = (FOCUS_OPTIONS || []).find((o) => o.id === S.coaching.weeklyFocus);
+  return f ? f.label : "—";
+}
+function gameDayView() {
+  if (!S.gameDay) return `<div class="empty">No game queued.</div>`;
+  const g = S.season.schedule.find((x) => x.id === S.gameDay.gameId);
+  if (!g) {
+    S.gameDay = null;
+    return `<div class="empty">Game not found. <button class="btn secondary" data-action="closeGameDay">Back</button></div>`;
+  }
+  const isHome = g.home === S.team.abbr;
+  const oppId = isHome ? g.away : g.home;
+  const opp = teamMeta(oppId);
+  const oppRec = seasonRecord(oppId);
+  const oppPower = teamPower(oppId);
+  const myPower = teamPower(S.team.abbr);
+  const gp = (S.coaching.gamePlans && S.coaching.gamePlans[g.id]) || {
+    scouted: false,
+    plan: null,
+  };
+  const topRotation = S.roster
+    .slice()
+    .sort((a, b) => composite(b) - composite(a))
+    .slice(0, 8);
+  const fatigueAvg = topRotation.length
+    ? Math.round(
+        topRotation.reduce((s, p) => s + (p.fatigue || 0), 0) /
+          topRotation.length,
+      )
+    : 0;
+  const oppFocus = oppPower.intO > oppPower.perO ? "interior" : "perimeter";
+  const recommendedPlan = oppPower.intO > oppPower.perO ? "pack" : "extend";
+  const scoutBlock = gp.scouted
+    ? `<div class="impact" style="margin-top:10px"><div class="impactRow"><span>Per O</span><div class="bar"><i style="width:${oppPower.perO}%"></i></div><b>${oppPower.perO}</b></div><div class="impactRow"><span>Per D</span><div class="bar"><i style="width:${oppPower.perD}%"></i></div><b>${oppPower.perD}</b></div><div class="impactRow"><span>Int O</span><div class="bar"><i style="width:${oppPower.intO}%"></i></div><b>${oppPower.intO}</b></div><div class="impactRow"><span>Int D</span><div class="bar"><i style="width:${oppPower.intD}%"></i></div><b>${oppPower.intD}</b></div></div><p class="muted" style="margin-top:8px">Opponent leans <b>${oppFocus}</b>. Scouts recommend <b>${recommendedPlan === "pack" ? "Pack the Paint" : "Extend Defense"}</b>.</p>`
+    : `<div style="margin-top:10px"><button class="btn" data-scout="${g.id}">Scout Opponent</button><p class="muted" style="margin-top:8px">Skipping the scout means flying blind. You can still set a plan, but you won't know which lane to defend.</p></div>`;
+  const planBlock = `<div class="actions" style="margin-top:10px"><button class="btn ${gp.plan === "pack" ? "" : "secondary"}" data-plan="${g.id}|pack">Pack the Paint</button><button class="btn ${gp.plan === "extend" ? "" : "secondary"}" data-plan="${g.id}|extend">Extend Defense</button>${gp.plan ? `<button class="btn ghost" data-plan="${g.id}|none">Clear</button>` : ""}</div>`;
+  const rotationTable = `<table class="table"><thead><tr><th>Player</th><th>Pos</th><th>Fatigue</th><th>Mood</th></tr></thead><tbody>${topRotation.map((p) => `<tr><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div class="playerName">${p.name}</div></div></td><td>${p.pos}</td><td>${fatigueBadge(p)}</td><td>${p.mood || 60}</td></tr>`).join("")}</tbody></table>`;
+  return `<section class="card"><div class="sectionTitle"><h3>Game Day · Week ${g.week} · ${isHome ? "vs" : "at"} ${opp.name}</h3><span>${opp.id} ${oppRec.w}-${oppRec.l}</span></div><div class="cardPad"><div class="layout2"><section><h3 style="margin-top:0">Opponent</h3><p class="muted">${opp.name} · ${oppRec.w}-${oppRec.l} · power index ${oppPower.overall}</p>${scoutBlock}<h3 style="margin-top:18px">Your Game Plan</h3>${planBlock}</section><section><h3 style="margin-top:0">Your Prep</h3><p class="muted">Weekly Focus: <b>${currentFocusLabel()}</b></p><p class="muted">Plan: <b>${gp.plan === "pack" ? "Pack the Paint" : gp.plan === "extend" ? "Extend Defense" : "Not set"}</b></p><p class="muted">Power Index: <b>${myPower.overall}</b> · Per ${myPower.perO}/${myPower.perD} · Int ${myPower.intO}/${myPower.intD}</p><p class="muted">Top-8 avg fatigue: <b>${fatigueAvg}</b></p></section></div><h3 style="margin-top:18px">Top-8 Rotation</h3>${rotationTable}<div class="actions" style="margin-top:18px"><button class="btn" data-action="playQueuedGame" style="font-size:15px;padding:14px 20px">Play Game →</button><button class="btn secondary" data-action="closeGameDay">Hold Off</button></div></div></section>`;
 }
 function seasonKpis() {
   const r = seasonRecord(S.team.abbr);
@@ -1285,6 +1409,8 @@ function actions(a) {
     const rk = (document.getElementById("dev-rating") || {}).value || "scoring";
     setDevFocus(pid || null, rk);
   }
+  if (a === "playQueuedGame") playQueuedGame();
+  if (a === "closeGameDay") closeGameDay();
 }
 function draftPlayer(id) {
   const team = S.teams.find((t) => t.players.some((p) => p.id === id));
@@ -2078,7 +2204,7 @@ function fatigueBadge(p) {
   return `<span class="pill ${cls}">${f}</span>`;
 }
 function coachingView() {
-  return `${kpis()}<div class="layout2"><div>${weeklyFocusSection()}${nextGamesSection()}${devFocusSection()}</div><div>${pressSection()}${fatigueSection()}</div></div>`;
+  return `${kpis()}<div class="layout2"><div>${weeklyFocusSection()}${devFocusSection()}</div><div>${pressSection()}${fatigueSection()}</div></div><p class="muted" style="margin-top:14px;text-align:center">Pre-game scouting and game plans now live on the <b>Season</b> tab, alongside your upcoming opponents.</p>`;
 }
 function weeklyFocusSection() {
   const cur = S.coaching.weeklyFocus;
