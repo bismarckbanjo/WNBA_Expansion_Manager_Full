@@ -108,16 +108,17 @@ function migrate(s) {
   if (s.playoffs === undefined) s.playoffs = null;
   if (!Array.isArray(s.awards)) s.awards = [];
   if (s.pendingAwards === undefined) s.pendingAwards = null;
-  if (!s.coaches) {
-    s.coaches = {
-      head: JSON.parse(JSON.stringify(DATA.userStaffDefaults.head)),
-      assistant: JSON.parse(JSON.stringify(DATA.userStaffDefaults.assistant)),
-      dev: JSON.parse(JSON.stringify(DATA.userStaffDefaults.dev)),
-      pendingBuff: null,
-      devAccumulator: 0,
-    };
-  }
-  if (!s.coaches.pendingBuff) s.coaches.pendingBuff = null;
+  if (!s.coaches) s.coaches = {};
+  // Repair each role independently so a partial old save can't leave a coach undefined.
+  if (!s.coaches.head)
+    s.coaches.head = JSON.parse(JSON.stringify(DATA.userStaffDefaults.head));
+  if (!s.coaches.assistant)
+    s.coaches.assistant = JSON.parse(
+      JSON.stringify(DATA.userStaffDefaults.assistant),
+    );
+  if (!s.coaches.dev)
+    s.coaches.dev = JSON.parse(JSON.stringify(DATA.userStaffDefaults.dev));
+  if (s.coaches.pendingBuff === undefined) s.coaches.pendingBuff = null;
   if (typeof s.coaches.devAccumulator !== "number")
     s.coaches.devAccumulator = 0;
   // Stats foundations for every player
