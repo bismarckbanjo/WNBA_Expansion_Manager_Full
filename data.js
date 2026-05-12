@@ -5015,6 +5015,7 @@ function p(
     },
     archetype,
     mood: 55 + Math.floor(Math.random() * 30),
+    fatigue: 0,
   };
 }
 function slug(s) {

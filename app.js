@@ -8,7 +8,7 @@ const shortMoney = (n) =>
 const avg = (arr) =>
   arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : 0;
 const clone = (x) => JSON.parse(JSON.stringify(x));
-let S = load() || freshState();
+let S = load() || migrate(freshState());
 let tab = S.started ? "dashboard" : "setup";
 let selectedCity = DATA.expansionCities[0];
 let modal = null;
@@ -41,6 +41,14 @@ function freshState() {
     year: 2026,
     offseason: null,
     customRookies: {},
+    coaching: {
+      weeklyFocus: "none",
+      weeklyFocusWeek: 1,
+      devFocus: { playerId: null, rating: "scoring" },
+      gamePlans: {},
+      pendingPress: null,
+      pressLog: [],
+    },
     log: [],
     objectives: [
       { id: "roster11", text: "Draft at least 11 players", done: false },
@@ -65,6 +73,23 @@ function migrate(s) {
   if (s.offseason === undefined) s.offseason = null;
   if (!s.customRookies || typeof s.customRookies !== "object")
     s.customRookies = {};
+  if (!s.coaching) {
+    s.coaching = {
+      weeklyFocus: "none",
+      weeklyFocusWeek: s.week || 1,
+      devFocus: { playerId: null, rating: "scoring" },
+      gamePlans: {},
+      pendingPress: null,
+      pressLog: [],
+    };
+  }
+  // Ensure fatigue on every player record
+  const ensureFatigue = (p) => {
+    if (typeof p.fatigue !== "number") p.fatigue = 0;
+  };
+  (s.roster || []).forEach(ensureFatigue);
+  (s.waived || []).forEach(ensureFatigue);
+  (s.teams || []).forEach((t) => (t.players || []).forEach(ensureFatigue));
   return s;
 }
 function load() {
@@ -167,7 +192,7 @@ function render() {
   save();
 }
 function shell() {
-  return `<div class="appShell"><aside class="side"><div class="brand"><div class="logo"></div><div><h1>${S.team.city} ${S.team.nickname}</h1><p>Expansion Front Office</p></div></div><nav class="nav">${navBtn("dashboard", "Dashboard")} ${navBtn("draft", "Expansion Draft")} ${navBtn("roster", "Roster")} ${navBtn("schedule", "Season")} ${navBtn("trades", "Trade Desk")} ${navBtn("waivers", "Waivers")} ${navBtn("league", "League")} ${navBtn("admin", "Admin")}</nav><div class="sideCard"><div class="mini">Front Office Score</div><div class="big">${frontOfficeScore()}</div><p>${frontOfficeNote()}</p></div></aside><main class="main">${topbar()}${content()}${modalHtml()}</main></div>`;
+  return `<div class="appShell"><aside class="side"><div class="brand"><div class="logo"></div><div><h1>${S.team.city} ${S.team.nickname}</h1><p>Expansion Front Office</p></div></div><nav class="nav">${navBtn("dashboard", "Dashboard")} ${navBtn("draft", "Expansion Draft")} ${navBtn("roster", "Roster")} ${navBtn("schedule", "Season")} ${navBtn("trades", "Trade Desk")} ${navBtn("waivers", "Waivers")} ${navBtn("coaching", "Coaching")} ${navBtn("league", "League")} ${navBtn("admin", "Admin")}</nav><div class="sideCard"><div class="mini">Front Office Score</div><div class="big">${frontOfficeScore()}</div><p>${frontOfficeNote()}</p></div></aside><main class="main">${topbar()}${content()}${modalHtml()}</main></div>`;
 }
 function navBtn(id, label) {
   return `<button data-tab="${id}" class="${tab === id ? "active" : ""}"><span>${label}</span><b>${navBadge(id)}</b></button>`;
@@ -178,6 +203,7 @@ function navBadge(id) {
     return `${seasonRecord(S.team.abbr).w}-${seasonRecord(S.team.abbr).l}`;
   if (id === "trades") return S.picks.you;
   if (id === "waivers") return S.waived.length;
+  if (id === "coaching" && S.coaching && S.coaching.pendingPress) return "!";
   return "";
 }
 function topbar() {
@@ -190,6 +216,7 @@ function topbar() {
     waivers: "Waiver Wire",
     league: "League Overview",
     offseason: "Offseason",
+    coaching: "Coaching",
     admin: "Admin · Custom Rookies",
   };
   const title = S.offseason ? "Offseason " + S.year : titles[tab];
@@ -208,6 +235,7 @@ function content() {
     trades: trades(),
     waivers: waivers(),
     league: league(),
+    coaching: coachingView(),
     admin: adminView(),
   }[tab];
 }
@@ -688,8 +716,12 @@ function teamPower(id) {
   const W = [2.0, 1.5, 1.2, 1.0, 0.8, 0.5, 0.4, 0.3];
   const w = top.map((_, i) => W[i] ?? 0.3);
   const wSum = w.reduce((a, b) => a + b, 0);
+  // Fatigue multiplier: 0 fatigue = 1.0x, 100 fatigue = 0.5x output.
+  const fmult = (p) => 1 - (p.fatigue || 0) / 200;
   const wavg = (k) =>
-    Math.round(top.reduce((s, p, i) => s + p.ratings[k] * w[i], 0) / wSum);
+    Math.round(
+      top.reduce((s, p, i) => s + p.ratings[k] * w[i] * fmult(p), 0) / wSum,
+    );
   // Position-aware defensive share: guards defend the perimeter, bigs the paint.
   const defShare = (p) => {
     if (p.pos.includes("G")) return { per: 0.75, int: 0.25 };
@@ -698,7 +730,7 @@ function teamPower(id) {
   };
   const posWeighted = (k, side) => {
     const num = top.reduce(
-      (s, p, i) => s + p.ratings[k] * w[i] * defShare(p)[side],
+      (s, p, i) => s + p.ratings[k] * w[i] * defShare(p)[side] * fmult(p),
       0,
     );
     const den = top.reduce((s, p, i) => s + w[i] * defShare(p)[side], 0);
@@ -741,14 +773,56 @@ function teamPower(id) {
 function rand(min, max) {
   return Math.floor(min + Math.random() * (max - min + 1));
 }
-function simScore(home, away) {
+function simScore(home, away, game) {
   const hp = teamPower(home),
     ap = teamPower(away);
+  // Coaching modifiers when user team is in this game.
+  const mod = {
+    h: { perO: 0, perD: 0, intO: 0, intD: 0 },
+    a: { perO: 0, perD: 0, intO: 0, intD: 0 },
+  };
+  const userIs = home === S.team.abbr ? "h" : away === S.team.abbr ? "a" : null;
+  if (userIs && S.coaching) {
+    const m = mod[userIs];
+    const f = S.coaching.weeklyFocus;
+    if (f === "perO") m.perO += 2;
+    else if (f === "perD") m.perD += 2;
+    else if (f === "intO") m.intO += 2;
+    else if (f === "intD") m.intD += 2;
+    else if (f === "film") {
+      m.perO += 1;
+      m.perD += 1;
+      m.intO += 1;
+      m.intD += 1;
+    }
+    const gp = game && S.coaching.gamePlans && S.coaching.gamePlans[game.id];
+    if (gp) {
+      if (gp.scouted) {
+        m.perD += 1;
+        m.intD += 1;
+      }
+      if (gp.plan === "pack") {
+        m.intD += 3;
+        m.perD -= 1;
+      } else if (gp.plan === "extend") {
+        m.perD += 3;
+        m.intD -= 1;
+      }
+    }
+  }
+  const hPerO = hp.perO + mod.h.perO;
+  const hPerD = hp.perD + mod.h.perD;
+  const hIntO = hp.intO + mod.h.intO;
+  const hIntD = hp.intD + mod.h.intD;
+  const aPerO = ap.perO + mod.a.perO;
+  const aPerD = ap.perD + mod.a.perD;
+  const aIntO = ap.intO + mod.a.intO;
+  const aIntD = ap.intD + mod.a.intD;
   // Two head-to-head channels: perimeter scoring vs perimeter D, interior vs interior.
-  const hPer = 38 + (hp.perO - ap.perD) * 0.45;
-  const aPer = 37 + (ap.perO - hp.perD) * 0.45;
-  const hInt = 38 + (hp.intO - ap.intD) * 0.45;
-  const aInt = 37 + (ap.intO - hp.intD) * 0.45;
+  const hPer = 38 + (hPerO - aPerD) * 0.45;
+  const aPer = 37 + (aPerO - hPerD) * 0.45;
+  const hInt = 38 + (hIntO - aIntD) * 0.45;
+  const aInt = 37 + (aIntO - hIntD) * 0.45;
   const hRebEdge = (hp.reb - ap.reb) * 0.1;
   const aRebEdge = (ap.reb - hp.reb) * 0.1;
   // Roster-depth penalty: thin benches add late-game variance.
@@ -820,7 +894,19 @@ function topPerformers(id, ptsFor) {
 }
 function simulateGame(g) {
   if (!g || g.played) return;
-  const r = simScore(g.home, g.away);
+  const r = simScore(g.home, g.away, g);
+  // Fatigue accumulates for top-8 rotation on both teams.
+  const wear = (id) => {
+    const players = teamMeta(id)
+      .players.slice()
+      .sort((a, b) => composite(b) - composite(a))
+      .slice(0, 8);
+    players.forEach((p) => {
+      p.fatigue = Math.min(100, (p.fatigue || 0) + rand(5, 10));
+    });
+  };
+  wear(g.home);
+  wear(g.away);
   Object.assign(g, {
     played: true,
     homeScore: r.hs,
@@ -858,6 +944,7 @@ function simulateGame(g) {
       : "League final",
     `${teamMeta(g.away).name} ${g.awayScore}, ${teamMeta(g.home).name} ${g.homeScore}. ${teamMeta(g.winner).name} win.`,
   );
+  if (g.home === S.team.abbr || g.away === S.team.abbr) maybeTriggerPress(g);
 }
 function nextUnplayed() {
   return S.season.schedule.find((g) => !g.played);
@@ -1048,6 +1135,22 @@ function bind() {
     .querySelectorAll("[data-rm-rookie]")
     .forEach((b) => (b.onclick = () => removeCustomRookie(b.dataset.rmRookie)));
   document
+    .querySelectorAll("[data-focus]")
+    .forEach((b) => (b.onclick = () => setWeeklyFocus(b.dataset.focus)));
+  document
+    .querySelectorAll("[data-scout]")
+    .forEach((b) => (b.onclick = () => scoutGame(b.dataset.scout)));
+  document.querySelectorAll("[data-plan]").forEach(
+    (b) =>
+      (b.onclick = () => {
+        const [gid, plan] = b.dataset.plan.split("|");
+        setGamePlan(gid, plan === "none" ? null : plan);
+      }),
+  );
+  document
+    .querySelectorAll("[data-press]")
+    .forEach((b) => (b.onclick = () => respondToPress(b.dataset.press)));
+  document
     .querySelectorAll("[data-waive]")
     .forEach((b) => (b.onclick = () => waivePlayer(b.dataset.waive)));
   document
@@ -1141,10 +1244,12 @@ function actions(a) {
   if (a === "advance") {
     S.week++;
     marketChurn();
+    applyWeeklyTransition();
     addLog(
       "Week advanced",
-      `Front office calendar moves to Week ${S.week}. Scouts updated the waiver and trade boards.`,
+      `Front office calendar moves to Week ${S.week}. Practice plan applied, fatigue recovered, development logged.`,
     );
+    save();
     render();
   }
   if (a === "simNext") simNextGame();
@@ -1175,6 +1280,11 @@ function actions(a) {
   if (a === "advanceToDraft") advanceToDraft();
   if (a === "startNextSeason") startNextSeason();
   if (a === "addCustomRookie") addCustomRookie();
+  if (a === "commitDevFocus") {
+    const pid = (document.getElementById("dev-player") || {}).value || null;
+    const rk = (document.getElementById("dev-rating") || {}).value || "scoring";
+    setDevFocus(pid || null, rk);
+  }
 }
 function draftPlayer(id) {
   const team = S.teams.find((t) => t.players.some((p) => p.id === id));
@@ -1498,6 +1608,7 @@ function generateRookieClass(year) {
         ratings,
         archetype: t.arch,
         mood: 60 + Math.floor(Math.random() * 25),
+        fatigue: 0,
       });
     }
   }
@@ -1771,6 +1882,291 @@ function offseasonDoneView() {
     )}</div><div class="actions" style="margin-top:18px"><button class="btn" data-action="startNextSeason">Start ${S.year + 1} Season</button></div></div></section>`;
 }
 
+// =================== COACHING: weekly focus, scouting, fatigue, dev, press =====================
+const FOCUS_OPTIONS = [
+  {
+    id: "none",
+    label: "No Focus",
+    desc: "Maintenance week. Players neither gain nor regress.",
+    icon: "—",
+  },
+  {
+    id: "perO",
+    label: "Perimeter Offense",
+    desc: "Shooting, spacing, ball movement. +2 to your team's perimeter offense this week.",
+    icon: "○",
+  },
+  {
+    id: "intO",
+    label: "Interior Offense",
+    desc: "Post work, rim attacks, finishing. +2 to interior offense.",
+    icon: "●",
+  },
+  {
+    id: "perD",
+    label: "Perimeter Defense",
+    desc: "Closeouts, screen navigation. +2 to perimeter defense.",
+    icon: "◇",
+  },
+  {
+    id: "intD",
+    label: "Interior Defense",
+    desc: "Rim protection, weakside help. +2 to interior defense.",
+    icon: "◆",
+  },
+  {
+    id: "conditioning",
+    label: "Conditioning",
+    desc: "Sweat hard. Extra -4 fatigue recovery this week (no rating boost).",
+    icon: "↻",
+  },
+  {
+    id: "film",
+    label: "Film Study",
+    desc: "Watch tape. +1 to all four channels this week.",
+    icon: "▶",
+  },
+  {
+    id: "rest",
+    label: "Rest Day",
+    desc: "Step back. -8 fatigue recovery this week. No training stimulus.",
+    icon: "z",
+  },
+];
+function setWeeklyFocus(id) {
+  if (!FOCUS_OPTIONS.some((f) => f.id === id)) return;
+  S.coaching.weeklyFocus = id;
+  S.coaching.weeklyFocusWeek = S.week;
+  save();
+  render();
+}
+function scoutGame(gameId) {
+  if (!S.coaching.gamePlans[gameId])
+    S.coaching.gamePlans[gameId] = { scouted: false, plan: null };
+  S.coaching.gamePlans[gameId].scouted = true;
+  save();
+  render();
+}
+function setGamePlan(gameId, plan) {
+  if (!S.coaching.gamePlans[gameId])
+    S.coaching.gamePlans[gameId] = { scouted: false, plan: null };
+  S.coaching.gamePlans[gameId].plan = plan;
+  save();
+  render();
+}
+function setDevFocus(playerId, ratingKey) {
+  S.coaching.devFocus = { playerId, rating: ratingKey };
+  save();
+  render();
+}
+function userUpcomingGames(n) {
+  if (!S.season) return [];
+  return S.season.schedule
+    .filter(
+      (g) => !g.played && (g.home === S.team.abbr || g.away === S.team.abbr),
+    )
+    .slice(0, n || 3);
+}
+function applyWeeklyTransition() {
+  // Natural recovery for all players (top-8 rotation absorbed heavier load earlier).
+  const recover = (p, amt) => {
+    p.fatigue = Math.max(0, (p.fatigue || 0) - amt);
+  };
+  S.roster.forEach((p) => recover(p, 3));
+  // AI teams recover slightly more (they have their own coaching tools we abstract).
+  S.teams.forEach((t) => t.players.forEach((p) => recover(p, 5)));
+  // Practice focus side-effects on user roster.
+  const f = S.coaching.weeklyFocus;
+  if (f === "conditioning") S.roster.forEach((p) => recover(p, 4));
+  else if (f === "rest") S.roster.forEach((p) => recover(p, 8));
+  else if (f !== "none" && f !== "film")
+    S.roster.forEach((p) => {
+      p.fatigue = Math.min(100, (p.fatigue || 0) + 3);
+    });
+  // Player dev focus: +1 to chosen rating per week, capped at potential.
+  const df = S.coaching.devFocus;
+  if (df && df.playerId) {
+    const target = S.roster.find((p) => p.id === df.playerId);
+    if (target) {
+      const k = df.rating;
+      const cap = Math.min(99, target.ratings.potential);
+      if (target.ratings[k] < cap) {
+        target.ratings[k] = Math.min(cap, (target.ratings[k] || 0) + 1);
+        addLog(
+          "Development",
+          `${target.name} improved +1 in ${k} after focused practice.`,
+        );
+      }
+    }
+  }
+}
+function maybeTriggerPress(g) {
+  if (!S.coaching || S.coaching.pendingPress) return;
+  const isUserHome = g.home === S.team.abbr;
+  const oppId = isUserHome ? g.away : g.home;
+  const won = g.winner === S.team.abbr;
+  const oppRec = seasonRecord(oppId);
+  const games = oppRec.w + oppRec.l;
+  const oppPct = games ? oppRec.w / games : 0.5;
+  let prompt = null;
+  if (won && (oppPct > 0.6 || games < 5)) {
+    prompt = {
+      gameId: g.id,
+      headline: `Statement win over ${teamMeta(oppId).name}`,
+      body: "Reporters crowd the podium. What's the message?",
+      options: [
+        { id: "team", text: "Credit the entire roster — it was a team win." },
+        { id: "stars", text: "Highlight star performances and clutch plays." },
+        { id: "defense", text: "Talk up the defensive scheme and prep work." },
+      ],
+    };
+  } else if (!won && oppPct < 0.45) {
+    prompt = {
+      gameId: g.id,
+      headline: `Tough loss to ${teamMeta(oppId).name}`,
+      body: "The press wants accountability. Choose your tone.",
+      options: [
+        { id: "responsible", text: "Take full responsibility yourself." },
+        { id: "schedule", text: "Point to fatigue and the schedule." },
+        { id: "honest", text: "Be honest — execution wasn't there." },
+      ],
+    };
+  }
+  if (prompt) S.coaching.pendingPress = prompt;
+}
+function respondToPress(optId) {
+  const p = S.coaching.pendingPress;
+  if (!p) return;
+  const opt = p.options.find((o) => o.id === optId);
+  if (!opt) return;
+  const clampMood = (n) => Math.max(20, Math.min(99, n));
+  if (optId === "team")
+    S.roster.forEach((r) => (r.mood = clampMood((r.mood || 60) + 2)));
+  else if (optId === "stars")
+    S.roster
+      .slice()
+      .sort((a, b) => composite(b) - composite(a))
+      .slice(0, 3)
+      .forEach((r) => (r.mood = clampMood((r.mood || 60) + 4)));
+  else if (optId === "defense")
+    S.roster
+      .slice()
+      .sort((a, b) => b.ratings.defense - a.ratings.defense)
+      .slice(0, 3)
+      .forEach((r) => (r.mood = clampMood((r.mood || 60) + 3)));
+  else if (optId === "responsible") {
+    /* mood damage already absorbed by loss; coach takes hit silently */
+  } else if (optId === "schedule")
+    S.roster.forEach((r) => {
+      r.fatigue = Math.max(0, (r.fatigue || 0) - 4);
+    });
+  else if (optId === "honest")
+    S.roster.forEach((r) => (r.mood = clampMood((r.mood || 60) - 1)));
+  S.coaching.pressLog.unshift({
+    when: `Week ${S.week}`,
+    headline: p.headline,
+    choice: opt.text,
+  });
+  if (S.coaching.pressLog.length > 12) S.coaching.pressLog.length = 12;
+  S.coaching.pendingPress = null;
+  save();
+  render();
+}
+function fatigueBadge(p) {
+  const f = p.fatigue || 0;
+  const cls = f >= 80 ? "bad" : f >= 60 ? "warn" : f >= 35 ? "" : "good";
+  return `<span class="pill ${cls}">${f}</span>`;
+}
+function coachingView() {
+  return `${kpis()}<div class="layout2"><div>${weeklyFocusSection()}${nextGamesSection()}${devFocusSection()}</div><div>${pressSection()}${fatigueSection()}</div></div>`;
+}
+function weeklyFocusSection() {
+  const cur = S.coaching.weeklyFocus;
+  const tiles = FOCUS_OPTIONS.map(
+    (f) =>
+      `<div class="cityTile ${cur === f.id ? "selected" : ""}" data-focus="${f.id}"><strong>${f.icon} ${f.label}</strong><small>${f.desc}</small></div>`,
+  ).join("");
+  return `<section class="card"><div class="sectionTitle"><h3>This Week's Focus</h3><span>Week ${S.week} · sets the tone for every game until you change it</span></div><div class="cardPad"><div class="tiles">${tiles}</div></div></section>`;
+}
+function nextGamesSection() {
+  const games = userUpcomingGames(3);
+  if (!games.length)
+    return `<section class="card"><div class="sectionTitle"><h3>Upcoming Games</h3></div><div class="cardPad"><div class="empty">No upcoming games — season complete or not started.</div></div></section>`;
+  const cards = games
+    .map((g) => {
+      const isHome = g.home === S.team.abbr;
+      const oppId = isHome ? g.away : g.home;
+      const opp = teamMeta(oppId);
+      const oppPower = teamPower(oppId);
+      const gp = S.coaching.gamePlans[g.id] || {
+        scouted: false,
+        plan: null,
+      };
+      const scoutBlock = gp.scouted
+        ? `<div class="impact"><div class="impactRow"><span>Per O</span><div class="bar"><i style="width:${oppPower.perO}%"></i></div><b>${oppPower.perO}</b></div><div class="impactRow"><span>Per D</span><div class="bar"><i style="width:${oppPower.perD}%"></i></div><b>${oppPower.perD}</b></div><div class="impactRow"><span>Int O</span><div class="bar"><i style="width:${oppPower.intO}%"></i></div><b>${oppPower.intO}</b></div><div class="impactRow"><span>Int D</span><div class="bar"><i style="width:${oppPower.intD}%"></i></div><b>${oppPower.intD}</b></div></div><div class="mini" style="margin-top:8px">Tip: ${oppPower.intO > oppPower.perO ? "Interior-heavy attack — Pack the Paint defends their best lane." : "Perimeter-driven offense — Extend Defense closes their shooters."}</div>`
+        : `<button class="btn secondary" data-scout="${g.id}">Scout Opponent</button>`;
+      const planBlock = gp.scouted
+        ? `<div class="actions" style="margin-top:10px"><button class="btn ${gp.plan === "pack" ? "" : "secondary"}" data-plan="${g.id}|pack">Pack the Paint</button><button class="btn ${gp.plan === "extend" ? "" : "secondary"}" data-plan="${g.id}|extend">Extend Defense</button>${gp.plan ? `<button class="btn ghost" data-plan="${g.id}|none">Clear</button>` : ""}</div>`
+        : "";
+      return `<div class="logItem"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px"><b>Week ${g.week} · ${isHome ? "vs" : "at"} <span class="teamBadge" style="background:${opp.primary}">${oppId}</span> ${opp.name}</b><span class="pill">${gp.plan ? (gp.plan === "pack" ? "Pack" : "Extend") : gp.scouted ? "Plan?" : "Unscouted"}</span></div><div style="margin-top:10px">${scoutBlock}${planBlock}</div></div>`;
+    })
+    .join("");
+  return `<section class="card"><div class="sectionTitle"><h3>Upcoming Games</h3><span>scout opponents, set defensive plans</span></div><div class="cardPad log">${cards}</div></section>`;
+}
+function devFocusSection() {
+  const cur = S.coaching.devFocus || { playerId: null, rating: "scoring" };
+  const roster = S.roster.slice().sort((a, b) => composite(b) - composite(a));
+  const playerOpts =
+    `<option value="">— No development focus —</option>` +
+    roster
+      .map(
+        (p) =>
+          `<option value="${p.id}" ${cur.playerId === p.id ? "selected" : ""}>${p.name} · ${p.pos} · pot ${p.ratings.potential}</option>`,
+      )
+      .join("");
+  const ratingOpts = RATING_KEYS.filter((k) => k !== "potential")
+    .map(
+      (k) =>
+        `<option value="${k}" ${cur.rating === k ? "selected" : ""}>${k}</option>`,
+    )
+    .join("");
+  const target = cur.playerId
+    ? S.roster.find((p) => p.id === cur.playerId)
+    : null;
+  const note = target
+    ? `Currently developing <b>${target.name}</b> on <b>${cur.rating}</b> (${target.ratings[cur.rating]} → cap ${Math.min(99, target.ratings.potential)}). +1 per week until capped.`
+    : "Pick a player and rating to give them focused individual work each week.";
+  return `<section class="card"><div class="sectionTitle"><h3>Player Development</h3><span>+1 rating per week</span></div><div class="cardPad"><div class="field"><label>Player</label><select id="dev-player">${playerOpts}</select></div><div class="field"><label>Skill emphasis</label><select id="dev-rating">${ratingOpts}</select></div><div class="actions"><button class="btn" data-action="commitDevFocus">Set Development</button></div><p class="muted" style="margin-top:10px">${note}</p></div></section>`;
+}
+function fatigueSection() {
+  if (!S.roster.length)
+    return `<section class="card"><div class="sectionTitle"><h3>Roster Fatigue</h3></div><div class="cardPad"><div class="empty">Draft a roster first.</div></div></section>`;
+  const rows = S.roster
+    .slice()
+    .sort((a, b) => (b.fatigue || 0) - (a.fatigue || 0))
+    .map(
+      (p) =>
+        `<tr><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div><div class="playerName">${p.name}</div><div class="mini">${p.pos} · ${visibleGrade(p)}</div></div></div></td><td>${fatigueBadge(p)}</td><td>${p.mood || 60}</td></tr>`,
+    )
+    .join("");
+  const avgF = Math.round(
+    S.roster.reduce((s, p) => s + (p.fatigue || 0), 0) / S.roster.length,
+  );
+  return `<section class="card"><div class="sectionTitle"><h3>Roster Fatigue</h3><span>team avg ${avgF}</span></div><table class="table"><thead><tr><th>Player</th><th>Fatigue</th><th>Mood</th></tr></thead><tbody>${rows}</tbody></table></section>`;
+}
+function pressSection() {
+  const pending = S.coaching.pendingPress;
+  const log = S.coaching.pressLog || [];
+  let pendingHtml = "";
+  if (pending) {
+    pendingHtml = `<div class="logItem" style="border-color:var(--orange);background:#fff6ee"><b>${pending.headline}</b><p class="muted">${pending.body}</p><div class="actions" style="flex-direction:column;align-items:stretch;gap:8px">${pending.options.map((o) => `<button class="btn secondary" data-press="${o.id}" style="text-align:left">${o.text}</button>`).join("")}</div></div>`;
+  }
+  const logHtml = log.length
+    ? `<div class="log">${log.map((e) => `<div class="logItem"><b>${e.headline}</b><div class="mini">${e.when} · "${e.choice}"</div></div>`).join("")}</div>`
+    : '<div class="empty">No press conferences yet.</div>';
+  return `<section class="card"><div class="sectionTitle"><h3>Press &amp; Locker Room</h3><span>${pending ? "1 pending" : log.length + " on record"}</span></div><div class="cardPad">${pendingHtml || ""}<h3 style="margin-top:${pending ? "18px" : "0"}">Recent Briefings</h3>${logHtml}</div></section>`;
+}
+
 // =================== ADMIN: custom rookies =====================
 const ARCHETYPE_OPTIONS = [
   "star",
@@ -1867,6 +2263,7 @@ function addCustomRookie() {
     ratings,
     archetype,
     mood: 65,
+    fatigue: 0,
   });
   save();
   toast(`${name} added to ${year} draft class.`);
