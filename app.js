@@ -650,7 +650,10 @@ function teamPower(id) {
       depth: 0,
     };
   const top = players.slice(0, 8);
-  const w = top.map((_, i) => (i < 5 ? 1.15 : 0.72));
+  // Heavier top-player weighting: top 3 carry ~63% of the team rating,
+  // so star concentration matters more than bench depth.
+  const W = [2.0, 1.5, 1.2, 1.0, 0.8, 0.5, 0.4, 0.3];
+  const w = top.map((_, i) => W[i] ?? 0.3);
   const wSum = w.reduce((a, b) => a + b, 0);
   const wavg = (k) =>
     Math.round(top.reduce((s, p, i) => s + p.ratings[k] * w[i], 0) / wSum);
@@ -720,8 +723,8 @@ function simScore(home, away) {
   const aThin = Math.max(0, 10 - ap.depth);
   const hBase = hPer + hInt + hRebEdge + 2.2; // 2.2 = home court
   const aBase = aPer + aInt + aRebEdge;
-  let hs = Math.max(58, Math.round(hBase + rand(-5 - hThin, 6 + hThin)));
-  let as = Math.max(55, Math.round(aBase + rand(-5 - aThin, 6 + aThin)));
+  let hs = Math.max(58, Math.round(hBase + rand(-7 - hThin, 8 + hThin)));
+  let as = Math.max(55, Math.round(aBase + rand(-7 - aThin, 8 + aThin)));
   if (hs === as) hs += rand(1, 5);
   return { hs, as, hp, ap };
 }
