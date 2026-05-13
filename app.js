@@ -1,5 +1,6 @@
 const DATA = window.GAME_DATA;
 const LS_KEY = "wnbaExpansionFullBuild.v2";
+const SAVE_VERSION = 3;
 const money = (n) => "$" + Math.round(n).toLocaleString();
 const shortMoney = (n) =>
   n >= 1000000
@@ -8,6 +9,14 @@ const shortMoney = (n) =>
 const avg = (arr) =>
   arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : 0;
 const clone = (x) => JSON.parse(JSON.stringify(x));
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
 let S = load() || migrate(freshState());
 let tab = S.started ? "dashboard" : "setup";
 let selectedCity = DATA.expansionCities[0];
@@ -47,6 +56,8 @@ function freshState() {
     picks: { you: 3, league: 2 },
     season: null,
     year: 2026,
+    saveVersion: SAVE_VERSION,
+    lastSaved: new Date().toISOString(),
     offseason: null,
     customRookies: {},
     coaching: {
@@ -112,6 +123,9 @@ function migrate(s) {
   // Repair each role independently so a partial old save can't leave a coach undefined.
   if (!s.coaches.head)
     s.coaches.head = JSON.parse(JSON.stringify(DATA.userStaffDefaults.head));
+  if (typeof s.saveVersion !== "number") s.saveVersion = 1;
+  if (!s.lastSaved) s.lastSaved = new Date().toISOString();
+  if (s.saveVersion < SAVE_VERSION) s.saveVersion = SAVE_VERSION;
   if (!s.coaches.assistant)
     s.coaches.assistant = JSON.parse(
       JSON.stringify(DATA.userStaffDefaults.assistant),
@@ -147,7 +161,37 @@ function load() {
   }
 }
 function save() {
+  S.saveVersion = SAVE_VERSION;
+  S.lastSaved = new Date().toISOString();
   localStorage.setItem(LS_KEY, JSON.stringify(S));
+}
+function exportSave() {
+  const text = JSON.stringify(S, null, 2);
+  const blob = new Blob([text], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `wnba-expansion-save-${S.year}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  toast("Save exported.");
+}
+function importSave() {
+  const raw = (document.getElementById("saveImport") || {}).value || "";
+  if (!raw.trim()) return toast("Paste JSON into the import box first.");
+  try {
+    const incoming = migrate(JSON.parse(raw));
+    if (!incoming) throw new Error("Invalid save data.");
+    S = incoming;
+    tab = S.started ? "dashboard" : "setup";
+    toast("Save imported successfully.");
+    render();
+  } catch (error) {
+    console.error(error);
+    toast("Import failed: invalid save JSON.");
+  }
 }
 function toast(msg) {
   const t = document.createElement("div");
@@ -201,8 +245,9 @@ function portraitHtml(player, size) {
     .slice(0, 2)
     .toUpperCase();
   const cls = "portrait" + (size ? " " + size : "");
+  const escapedName = escapeHtml(player.name);
   const img = id
-    ? `<img src="https://a.espncdn.com/i/headshots/wnba/players/full/${id}.png" alt="${player.name}" onerror="this.style.display='none'" loading="lazy">`
+    ? `<img src="https://a.espncdn.com/i/headshots/wnba/players/full/${id}.png" alt="${escapedName}" onerror="this.style.display='none'" loading="lazy">`
     : "";
   return `<div class="${cls}">${initials}${img}</div>`;
 }
@@ -268,7 +313,7 @@ function render() {
   save();
 }
 function shell() {
-  return `<div class="appShell"><aside class="side"><div class="brand"><div class="logo"></div><div><h1>${S.team.city} ${S.team.nickname}</h1><p>Expansion Front Office</p></div></div><nav class="nav">${navBtn("dashboard", "Dashboard")} ${navBtn("draft", "Expansion Draft")} ${navBtn("roster", "Roster")} ${navBtn("schedule", "Season")} ${navBtn("trades", "Trade Desk")} ${navBtn("waivers", "Waivers")} ${navBtn("coaching", "Coaching")} ${navBtn("league", "League")} ${navBtn("admin", "Admin")}</nav><div class="sideCard"><div class="mini">Front Office Score</div><div class="big">${frontOfficeScore()}</div><p>${frontOfficeNote()}</p></div></aside><main class="main">${topbar()}${content()}${modalHtml()}</main></div>`;
+  return `<div class="appShell"><aside class="side"><div class="brand"><div class="logo"></div><div><h1>${escapeHtml(S.team.city)} ${escapeHtml(S.team.nickname)}</h1><p>Expansion Front Office</p></div></div><nav class="nav">${navBtn("dashboard", "Dashboard")} ${navBtn("draft", "Expansion Draft")} ${navBtn("roster", "Roster")} ${navBtn("schedule", "Season")} ${navBtn("trades", "Trade Desk")} ${navBtn("waivers", "Waivers")} ${navBtn("coaching", "Coaching")} ${navBtn("league", "League")} ${navBtn("admin", "Admin")}</nav><div class="sideCard"><div class="mini">Front Office Score</div><div class="big">${frontOfficeScore()}</div><p>${frontOfficeNote()}</p><p class="mini">${frontOfficeDrivers()}</p></div></aside><main class="main">${topbar()}${content()}${modalHtml()}</main></div>`;
 }
 function navBtn(id, label) {
   return `<button data-tab="${id}" class="${tab === id ? "active" : ""}"><span>${label}</span><b>${navBadge(id)}</b></button>`;
@@ -346,12 +391,14 @@ function kpis() {
   return `<div class="grid kpis"><div class="card kpi"><label>Roster</label><div class="value">${S.roster.length}/${DATA.rosterMax}</div><small>${DATA.rosterMin} needed for opening night</small></div><div class="card kpi"><label>Cap Room</label><div class="value">${shortMoney(DATA.cap - sal)}</div><small>${money(sal)} committed</small></div><div class="card kpi"><label>Team Grade</label><div class="value">${teamLetter(talent)}</div><small>${talent || 0} current talent · ${pot || 0} upside</small></div><div class="card kpi"><label>Build Identity</label><div class="value">${balance.identity}</div><small>${balance.note}</small></div></div>`;
 }
 function dashboard() {
-  return `${kpis()}<div class="layout2"><section class="card"><div class="sectionTitle"><h3>Owner Briefing</h3><span>visible systems, not placeholder text</span></div><div class="cardPad"><div class="layout3"><div><h3>${S.team.city} ${S.team.nickname}</h3><p class="muted">${S.team.arena}. You are building a one-season expansion roster under a simplified cap while protecting future optionality.</p><button class="btn" data-tab="draft">Open Draft Room</button></div><div class="impact">${impactBars()}</div><div class="log">${nextGameBrief()}${S.objectives.map((o) => `<div class="logItem"><span class="pill ${o.done ? "good" : "warn"}">${o.done ? "Complete" : "Open"}</span><div style="margin-top:8px;font-weight:800">${o.text}</div></div>`).join("")}</div></div></div></section><section class="card"><div class="sectionTitle"><h3>Front Office Feed</h3><span>${S.log.length} events</span></div><div class="cardPad log">${
+  const best = bestPlayer();
+  const weak = weakestPositionGroup();
+  return `${kpis()}<div class="layout2"><section class="card"><div class="sectionTitle"><h3>Owner Briefing</h3><span>Visible franchise pulse and next actions</span></div><div class="cardPad"><div class="layout3"><div><h3>${escapeHtml(S.team.city)} ${escapeHtml(S.team.nickname)}</h3><p class="muted">${escapeHtml(S.team.arena)}. You are building a one-season expansion roster under a simplified cap while protecting future optionality.</p><button class="btn" data-tab="draft">Open Draft Room</button></div><div class="impact">${impactBars()}</div><div class="log"><div class="logItem"><b>Next opponent</b><p class="muted">${escapeHtml(nextOpponentSummary())}</p></div><div class="logItem"><b>Best player</b><p class="muted">${best ? escapeHtml(best.name) + " · " + escapeHtml(visibleGrade(best)) : "No roster yet."}</p></div><div class="logItem"><b>Weakest group</b><p class="muted">${escapeHtml(weak.pos)} depth · ${weak.count}</p></div><div class="logItem"><b>Recommended next move</b><p class="muted">${escapeHtml(recommendation())}</p></div></div></div></div></section><section class="card"><div class="sectionTitle"><h3>Front Office Feed</h3><span>${S.log.length} events</span></div><div class="cardPad log">${
     S.log
       .slice(0, 8)
       .map(
         (l) =>
-          `<div class="logItem"><b>${l.title}</b><p class="muted">${l.body}</p><small>${l.when}</small></div>`,
+          `<div class="logItem"><b>${escapeHtml(l.title)}</b><p class="muted">${escapeHtml(l.body)}</p><small>${escapeHtml(l.when)}</small></div>`,
       )
       .join("") ||
     '<div class="empty">No moves yet. Draft someone, waive someone, or attempt a trade.</div>'
@@ -407,6 +454,16 @@ function frontOfficeNote() {
   if (S.objectives.every((o) => o.done))
     return "Opening-night requirements are met. Now optimize roles and trade value.";
   return "The foundation is forming, but the rotation still needs intentional balance.";
+}
+function frontOfficeDrivers() {
+  const drivers = [];
+  drivers.push(`${S.roster.length} roster player${S.roster.length === 1 ? "" : "s"}`);
+  drivers.push(userSalary() <= DATA.cap ? "Cap compliant" : "Over cap");
+  const completed = S.objectives.filter((o) => o.done).length;
+  drivers.push(`${completed} objective${completed === 1 ? "" : "s"} done`);
+  if (S.picks.you > 2) drivers.push(`${S.picks.you - 2} extra draft pick${S.picks.you - 2 === 1 ? "" : "s"}`);
+  drivers.push(`Upside ${Math.round(avg(S.roster.map((p) => p.ratings.potential)) || 0)}`);
+  return drivers.join(" · ");
 }
 function rosterBalance() {
   const r = teamRatings();
@@ -471,7 +528,7 @@ function draft() {
       (s) =>
         `<option value="${s}" ${draftFilters.strength === s ? "selected" : ""}>${s}</option>`,
     ).join("");
-  return `${kpis()}<section class="card"><div class="sectionTitle"><h3>Available Expansion Pool</h3><span>protected stars are visible but locked unless acquired by trade</span></div><div class="filters"><input data-filter="q" placeholder="Search name/team/scouting" value="${draftFilters.q}"><select data-filter="strength">${strengthOpts}</select><select data-filter="pos"><option>ALL</option>${["G", "F", "C"].map((x) => `<option ${draftFilters.pos === x ? "selected" : ""}>${x}</option>`).join("")}</select><select data-filter="team"><option>ALL</option>${S.teams.map((t) => `<option value="${t.id}" ${draftFilters.team === t.id ? "selected" : ""}>${t.name}</option>`).join("")}</select><select data-filter="arch">${archOpts}</select><select data-filter="risk"><option value="ALL">All risk profiles</option><option ${draftFilters.risk === "upside" ? "selected" : ""} value="upside">Upside</option><option ${draftFilters.risk === "safe" ? "selected" : ""} value="safe">Safe veterans</option><option ${draftFilters.risk === "cheap" ? "selected" : ""} value="cheap">Cheap contracts</option></select></div><div class="board">${pool.map(playerDraftCard).join("") || '<div class="empty">No players match those filters.</div>'}</div></section>`;
+  return `${kpis()}<section class="card"><div class="sectionTitle"><h3>Available Expansion Pool</h3><span>protected stars are visible but locked unless acquired by trade</span></div><div class="filters"><input data-filter="q" placeholder="Search name/team/scouting" value="${draftFilters.q}"><select data-filter="strength">${strengthOpts}</select><select data-filter="pos"><option>ALL</option>${["G", "F", "C"].map((x) => `<option ${draftFilters.pos === x ? "selected" : ""}>${x}</option>`).join("")}</select><select data-filter="team"><option>ALL</option>${S.teams.map((t) => `<option value="${t.id}" ${draftFilters.team === t.id ? "selected" : ""}>${t.name}</option>`).join("")}</select><select data-filter="arch">${archOpts}</select><select data-filter="risk"><option value="ALL">All risk profiles</option><option ${draftFilters.risk === "upside" ? "selected" : ""} value="upside">Upside</option><option ${draftFilters.risk === "safe" ? "selected" : ""} value="safe">Safe veterans</option><option ${draftFilters.risk === "cheap" ? "selected" : ""} value="cheap">Cheap contracts</option></select><button class="btn secondary" style="height:42px;white-space:nowrap" data-action="resetDraftFilters">Reset filters</button></div><div class="cardPad callout"><strong>Draft tip:</strong> Use the filters to target upside, cheap veterans, or positional fit. Reset filters anytime to reopen the full expansion pool.</div><div class="board">${pool.map(playerDraftCard).join("") || '<div class="empty">No players match those filters. Clear filters or broaden your search to see more expansion prospects.</div>'}</div></section>`;
 }
 function filteredDraftPool() {
   return allLeaguePlayers()
@@ -506,13 +563,13 @@ function playerDraftCard(p) {
     p.protected ||
     S.roster.length >= DATA.expansionPickLimit ||
     userSalary() + p.salary > DATA.cap;
-  return `<div class="playerCard">${portraitHtml(p)}<div><div><span class="playerName">${p.name}</span> <span class="pill">${p.pos}</span> <span class="pill" style="background:${p.teamObj.primary};color:white">${p.team}</span> ${p.protected ? '<span class="pill bad">Protected</span>' : ""}</div><div class="scout">${p.scouting}</div><div class="tags"><span class="tag">${visibleGrade(p)}</span><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${p.years} yr</span><span class="tag">Strength: ${p.strengths.split(",")[0]}</span><span class="tag">Concern: ${p.weaknesses.split(",")[0]}</span></div></div><div class="actions"><button class="btn secondary" data-view="${p.id}">Scout</button><button class="btn ${disabled ? "secondary" : ""}" ${disabled ? "disabled" : ""} data-draft="${p.id}">${p.protected ? "Locked" : userSalary() + p.salary > DATA.cap ? "No Cap" : "Draft"}</button></div></div>`;
+  return `<div class="playerCard">${portraitHtml(p)}<div><div><span class="playerName">${p.name}</span> <span class="pill">${p.pos}</span> <span class="pill" style="background:${p.teamObj.primary};color:white">${p.team}</span> ${p.protected ? '<span class="pill bad">Protected</span>' : ""}</div><div class="scout">${p.scouting}</div><div class="tags"><span class="tag">${visibleGrade(p)}</span><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${p.years} yr</span><span class="tag">${p.archetype}</span><span class="tag">Strength: ${p.strengths.split(",")[0]}</span><span class="tag">Weakness: ${p.weaknesses.split(",")[0]}</span></div></div><div class="actions"><button class="btn secondary" data-view="${p.id}">Scout</button><button class="btn ${disabled ? "secondary" : ""}" ${disabled ? "disabled" : ""} data-draft="${p.id}">${p.protected ? "Locked" : userSalary() + p.salary > DATA.cap ? "No Cap" : "Draft"}</button></div></div>`;
 }
 function roster() {
   return `${kpis()}<div class="layout2"><section class="card"><div class="sectionTitle"><h3>Cap Sheet</h3><span>${money(userSalary())} / ${money(DATA.cap)}</span></div>${rosterTable(S.roster)}</section><section class="card"><div class="sectionTitle"><h3>Roster Tools</h3><span>rotation control</span></div><div class="cardPad"><div class="impact">${impactBars()}</div><hr style="border:0;border-top:1px solid var(--line);margin:18px 0"><h3>Position Balance</h3>${positionBalance()}<h3>Recommended Next Move</h3><p class="muted">${recommendation()}</p></div></section></div>`;
 }
 function rosterTable(players) {
-  return `<table class="table"><thead><tr><th>Player</th><th>Pos</th><th>Role</th><th>Salary</th><th>Contract</th><th></th></tr></thead><tbody>${players.map((p) => `<tr><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div><div class="playerName">${p.name}</div><div class="mini">${p.scouting.slice(0, 90)}...</div></div></div></td><td>${p.pos}</td><td><span class="pill">${visibleGrade(p)}</span></td><td>${shortMoney(p.salary)}</td><td>${p.years} yr</td><td><button class="btn secondary" data-view="${p.id}">Scout</button> ${S.roster.find((x) => x.id === p.id) ? `<button class="btn danger" data-waive="${p.id}">Waive</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="6"><div class="empty">No players yet.</div></td></tr>`}</tbody></table>`;
+  return `<table class="table"><thead><tr><th>Player</th><th>Pos</th><th>Role</th><th>Salary</th><th>Contract</th><th></th></tr></thead><tbody>${players.map((p) => `<tr><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div><div class="playerName">${p.name}</div><div class="mini">${p.archetype} · ${p.strengths.split(",")[0]} · ${p.weaknesses.split(",")[0]}</div></div></div></td><td>${p.pos}</td><td><span class="pill">${visibleGrade(p)}</span></td><td>${shortMoney(p.salary)}</td><td>${p.years} yr</td><td><button class="btn secondary" data-view="${p.id}">Scout</button> ${S.roster.find((x) => x.id === p.id) ? `<button class="btn danger" data-waive="${p.id}">Waive</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="6"><div class="empty">No players yet.</div></td></tr>`}</tbody></table>`;
 }
 function positionBalance() {
   return ["G", "F", "C"]
@@ -531,6 +588,30 @@ function recommendation() {
   const low = Object.entries(r).sort((a, b) => a[1] - b[1])[0];
   return `Roster is legal. Improve ${low[0].toLowerCase()} before opening night.`;
 }
+function bestPlayer() {
+  if (!S.roster.length) return null;
+  return S.roster.reduce((best, p) =>
+    composite(p) > composite(best) ? p : best,
+    S.roster[0],
+  );
+}
+function weakestPositionGroup() {
+  const groups = ["G", "F", "C"].map((pos) => ({
+    pos,
+    count: S.roster.filter((p) => p.pos.includes(pos)).length,
+  }));
+  return groups.reduce((a, b) => (b.count < a.count ? b : a), groups[0]);
+}
+function nextOpponentSummary() {
+  const g = nextUserGame();
+  if (!g) return "No upcoming user games scheduled yet.";
+  const home = teamMeta(g.home);
+  const away = teamMeta(g.away);
+  const isHome = g.home === S.team.abbr;
+  const opponent = isHome ? away.name : home.name;
+  const need = teamNeed(isHome ? away : home);
+  return `${opponent} ${isHome ? "at home" : "on the road"} in Week ${g.week}. Opponent looks light on ${need} depth.`;
+}
 function trades() {
   const other = S.teams.find((t) => t.id === trade.team) || S.teams[0];
   const evaln = evaluateTrade(other);
@@ -543,11 +624,16 @@ function trades() {
     (p.pos || "").toLowerCase().includes(q);
   const userList = S.roster.filter(matches);
   const otherList = other.players.filter(matches);
-  return `${kpis()}<section class="card"><div class="sectionTitle"><h3>Trade Machine</h3><span>salary, value, team need, protected-player logic</span></div><div class="cardPad"><div class="layout2"><div class="field"><label>Trade partner</label><select data-trade-team>${S.teams.map((t) => `<option value="${t.id}" ${trade.team === t.id ? "selected" : ""}>${t.name} · ${t.status}</option>`).join("")}</select></div><div class="field"><label>Filter players (name, strength, archetype, position)</label><input data-trade-query placeholder="e.g. shooting" value="${trade.query || ""}"></div></div><div class="tradeBox"><div class="tradePanel"><div class="sectionTitle"><h3>${S.team.nickname} sends</h3><span>${shortMoney(sumSelected(S.roster, trade.userGive))}</span></div><div class="tradeList">${userList.map((p) => checkRow(p, "userGive")).join("") || '<div class="empty">No roster players match.</div>'}</div><div class="cardPad"><label><input type="checkbox" data-pick="user" ${trade.userPick ? "checked" : ""}> Include your future 1st-round pick</label></div></div><div class="tradePanel"><div class="sectionTitle"><h3>${other.name} sends</h3><span>${shortMoney(sumSelected(other.players, trade.otherGive))}</span></div><div class="tradeList">${otherList.map((p) => checkRow(p, "otherGive")).join("") || '<div class="empty">No partner players match.</div>'}</div><div class="cardPad"><label><input type="checkbox" data-pick="other" ${trade.otherPick ? "checked" : ""}> Request their future 2nd-round pick</label></div></div></div><div class="layout2" style="margin-top:18px"><div class="logItem"><b>Trade Verdict: <span class="pill ${evaln.ok ? "good" : "warn"}">${evaln.label}</span></b><p class="muted">${evaln.reason}</p><div class="meter"><span>Your outgoing value</span><div class="bar"><i style="width:${Math.min(100, evaln.userValue / 20)}%"></i></div><b>${evaln.userValue}</b></div><div class="meter"><span>Partner outgoing value</span><div class="bar"><i style="width:${Math.min(100, evaln.otherValue / 20)}%"></i></div><b>${evaln.otherValue}</b></div></div><div class="actions"><button class="btn" data-action="submitTrade" ${evaln.ok ? "" : "disabled"}>Submit Trade</button><button class="btn secondary" data-action="clearTrade">Clear Selections</button></div></div></div></section>`;
+  const partnerNeedLabel = {
+    G: "guards",
+    F: "forwards",
+    C: "centers",
+  }[teamNeed(other)] || "players";
+  return `${kpis()}<section class="card"><div class="sectionTitle"><h3>Trade Machine</h3><span>salary, value, team need, protected-player logic</span></div><div class="cardPad"><div class="layout2"><div class="field"><label>Trade partner</label><select data-trade-team>${S.teams.map((t) => `<option value="${t.id}" ${trade.team === t.id ? "selected" : ""}>${t.name} · ${t.status}</option>`).join("")}</select><div class="mini">Partner need: ${partnerNeedLabel}. Protected players are expensive; prioritize fit and future value.</div></div><div class="field"><label>Filter players (name, strength, archetype, position)</label><input data-trade-query placeholder="e.g. shooting" value="${trade.query || ""}"></div></div><div class="tradeBox"><div class="tradePanel"><div class="sectionTitle"><h3>${S.team.nickname} sends</h3><span>${shortMoney(sumSelected(S.roster, trade.userGive))}</span></div><div class="tradeList">${userList.map((p) => checkRow(p, "userGive")).join("") || '<div class="empty">No roster players match.</div>'}</div><div class="cardPad"><label><input type="checkbox" data-pick="user" ${trade.userPick ? "checked" : ""}> Include your future 1st-round pick</label></div></div><div class="tradePanel"><div class="sectionTitle"><h3>${other.name} sends</h3><span>${shortMoney(sumSelected(other.players, trade.otherGive))}</span></div><div class="tradeList">${otherList.map((p) => checkRow(p, "otherGive")).join("") || '<div class="empty">No partner players match.</div>'}</div><div class="cardPad"><label><input type="checkbox" data-pick="other" ${trade.otherPick ? "checked" : ""}> Request their future 2nd-round pick</label></div></div></div><div class="tradeSummary"><div class="logItem"><b>Trade Verdict: <span class="pill ${evaln.ok ? (evaln.label === "Strong Offer" ? "good" : evaln.label === "Good Offer" ? "info" : evaln.label === "Close Offer" ? "warn" : "good") : "warn"}">${evaln.label}</span></b><p class="muted">${evaln.reason}</p><div class="meter"><span>Your outgoing value</span><div class="bar"><i style="width:${Math.min(100, evaln.userValue / 20)}%"></i></div><b>${evaln.userValue}</b></div><div class="meter"><span>Partner outgoing value</span><div class="bar"><i style="width:${Math.min(100, evaln.otherValue / 20)}%"></i></div><b>${evaln.otherValue}</b></div></div>${evaln.advice && evaln.advice.length ? `<div class="tradeAdvice"><h4>Why this verdict?</h4><ul>${evaln.advice.map((item) => `<li>${item}</li>`).join("")}</ul></div>` : ""}</div><div class="actions"><button class="btn" data-action="submitTrade" ${evaln.ok ? "" : "disabled"}>Submit Trade</button><button class="btn secondary" data-action="clearTrade">Clear Selections</button></div></div></section>`;
 }
 function checkRow(p, side) {
   const checked = trade[side].includes(p.id);
-  return `<label class="checkRow"><input type="checkbox" data-trade-side="${side}" value="${p.id}" ${checked ? "checked" : ""}>${portraitHtml(p, "sm")}<div><b>${p.name}</b> <span class="pill">${p.pos}</span> ${p.protected ? '<span class="pill bad">protected cost</span>' : ""}<div class="mini">${visibleGrade(p)} · ${shortMoney(p.salary)} · ${p.scouting.slice(0, 76)}...</div></div></label>`;
+  return `<label class="checkRow"><input type="checkbox" data-trade-side="${side}" value="${p.id}" ${checked ? "checked" : ""}>${portraitHtml(p, "sm")}<div><b>${escapeHtml(p.name)}</b> <span class="pill">${escapeHtml(p.pos)}</span> ${p.protected ? '<span class="pill bad">protected cost</span>' : ""}<div class="mini">${escapeHtml(visibleGrade(p))} · ${shortMoney(p.salary)} · ${escapeHtml(p.scouting.slice(0, 76))}...</div></div></label>`;
 }
 function sumSelected(players, ids) {
   return players
@@ -562,14 +648,6 @@ function selectedValue(players, ids) {
 function evaluateTrade(other) {
   const uPlayers = S.roster.filter((p) => trade.userGive.includes(p.id));
   const oPlayers = other.players.filter((p) => trade.otherGive.includes(p.id));
-  if (!uPlayers.length && !oPlayers.length)
-    return {
-      ok: false,
-      label: "No Deal",
-      reason: "Select players or picks on both sides.",
-      userValue: 0,
-      otherValue: 0,
-    };
   let userValue =
     selectedValue(S.roster, trade.userGive) + (trade.userPick ? 420 : 0);
   let otherValue =
@@ -578,47 +656,75 @@ function evaluateTrade(other) {
     salaryOut = sumSelected(S.roster, trade.userGive);
   const futureSalary = userSalary() - salaryOut + salaryIn;
   let reasons = [];
+  let advice = [];
   let ok = true;
+  const hasUserAssets = uPlayers.length || trade.userPick;
+  const hasOtherAssets = oPlayers.length || trade.otherPick;
+  if (!hasUserAssets || !hasOtherAssets) {
+    ok = false;
+    if (!hasUserAssets) {
+      reasons.push("Include a roster player or future pick from your side.");
+      advice.push("Add a player or future pick to your side of the offer.");
+    }
+    if (!hasOtherAssets) {
+      reasons.push("Request a player or pick from the partner side.");
+      advice.push("Ask for a player or pick from your trade partner.");
+    }
+  }
   if (futureSalary > DATA.cap) {
     ok = false;
-    reasons.push("Your post-trade roster would exceed the simplified cap.");
+    reasons.push("Salary structure fails to fit the cap.");
+    advice.push("Keep your post-trade payroll under the cap by taking back cheaper salary.");
   }
   if (S.roster.length - uPlayers.length + oPlayers.length > DATA.rosterMax) {
     ok = false;
-    reasons.push("Your roster would exceed the maximum roster size.");
+    reasons.push("This trade would violate roster limits.");
+    advice.push("Trade fewer players or a single player to stay within roster limits.");
   }
   const protectedCount = oPlayers.filter((p) => p.protected).length;
   if (protectedCount && userValue < otherValue * 1.25) {
     ok = false;
-    reasons.push("Protected/core players require a serious overpay.");
+    reasons.push("Protected players are core assets; this package needs a stronger overpay or future pick.");
+    advice.push("Protected talent usually requires extra value or a pick to land." );
   }
   const partnerNeed = teamNeed(other);
   if (uPlayers.some((p) => p.pos.includes(partnerNeed))) userValue += 120;
   const ratio = userValue / (otherValue || 1);
-  if (ratio < 0.92) {
+  if (hasUserAssets && hasOtherAssets && ratio < 0.92) {
     ok = false;
-    reasons.push(`${other.name} believes the offer is light.`);
+    reasons.push("This offer is under market value.");
+    advice.push("Raise the offer by adding another player, future pick, or fit asset.");
   }
   if (!ok)
     return {
       ok: false,
       label: "Rejected",
       reason: reasons.join(" "),
+      advice: advice.length ? advice : ["Review the package and adjust the assets."] ,
       userValue,
       otherValue,
     };
-  if (ratio > 1.35)
-    return {
-      ok: true,
-      label: "Likely Accepted",
-      reason: `${other.name} likes the value, though your scouts warn you may be overpaying.`,
-      userValue,
-      otherValue,
-    };
+  let label = "Fair Trade";
+  let reason = `This package should be attractive to ${other.name}.`;
+  if (ratio >= 1.15) {
+    label = "Strong Offer";
+    reason = `This looks like a strong proposal for ${other.name}.`;
+    advice.push("This should be attractive to the partner and is worth submitting.");
+  } else if (ratio >= 1.0) {
+    label = "Good Offer";
+    reason = `This is a clean, market-value trade that helps ${other.name}'s ${partnerNeed} depth.`;
+    advice.push("Strong match; the partner's need is aligned with this package.");
+  } else if (ratio >= 0.92) {
+    label = "Close Offer";
+    reason = `This is close to a fair deal; a small sweetener could make it irresistible.`;
+    advice.push("A small extra asset or pick will likely move this deal through.");
+  }
+  if (!advice.length) advice.push("This offer checks the main boxes and is worth next-step review.");
   return {
     ok: true,
-    label: "Negotiable",
-    reason: `The deal is close enough to submit. Team need, salary and value are within acceptable bands.`,
+    label,
+    reason,
+    advice,
     userValue,
     otherValue,
   };
@@ -633,14 +739,15 @@ function teamNeed(t) {
   return Object.entries(counts).sort((a, b) => a[1] - b[1])[0][0];
 }
 function waivers() {
-  return `${kpis()}<div class="layout2"><section class="card"><div class="sectionTitle"><h3>Free Agents & Waivers</h3><span>cheap depth and regret board</span></div><div class="board">${waiverPool()
-    .map(
-      (p) =>
-        `<div class="playerCard">${portraitHtml(p)}<div><span class="playerName">${p.name}</span> <span class="pill">${p.pos}</span><div class="scout">${p.scouting}</div><div class="tags"><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${visibleGrade(p)}</span><span class="tag">${p.strengths.split(",")[0]}</span></div></div><button class="btn" data-sign="${p.id}">${userSalary() + p.salary > DATA.cap ? "No Cap" : "Sign"}</button></div>`,
-    )
-    .join(
-      "",
-    )}</div></section><section class="card"><div class="sectionTitle"><h3>Your Waived Players</h3><span>${S.waived.length}</span></div><div class="board">${S.waived.map((p) => `<div class="playerCard">${portraitHtml(p, "sm")}<div><b>${p.name}</b><div class="mini">${p.pos} · ${shortMoney(p.salary)}</div></div><button class="btn secondary" data-sign="${p.id}">Re-sign</button></div>`).join("") || '<div class="empty">No waived players yet.</div>'}</div></section></div>`;
+  const pool = waiverPool();
+  return `${kpis()}<div class="layout2"><section class="card"><div class="sectionTitle"><h3>Free Agents & Waivers</h3><span>cheap depth and regret board</span></div><div class="board">${pool.length
+    ? pool
+        .map(
+          (p) =>
+            `<div class="playerCard">${portraitHtml(p)}<div><span class="playerName">${p.name}</span> <span class="pill">${p.pos}</span><div class="scout">${p.scouting}</div><div class="tags"><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${visibleGrade(p)}</span><span class="tag">${p.strengths.split(",")[0]}</span></div></div><button class="btn" data-sign="${p.id}">${userSalary() + p.salary > DATA.cap ? "No Cap" : "Sign"}</button></div>`,
+        )
+        .join("")
+    : '<div class="empty">No available free agents right now. Check back after roster moves or widen your criteria.</div>'}</div></section><section class="card"><div class="sectionTitle"><h3>Your Waived Players</h3><span>${S.waived.length}</span></div><div class="board">${S.waived.map((p) => `<div class="playerCard">${portraitHtml(p, "sm")}<div><b>${p.name}</b><div class="mini">${p.pos} · ${shortMoney(p.salary)}</div></div><button class="btn secondary" data-sign="${p.id}">Re-sign</button></div>`).join("") || '<div class="empty">No waived players yet. Waive a player to open cap space or reshape your roster.</div>'}</div><div class="cardPad callout"><div class="actions" style="justify-content:flex-start;gap:10px"><button class="btn secondary" data-tab="roster">Review roster</button><button class="btn secondary" data-tab="draft">Browse draft pool</button></div><p class="muted" style="margin-top:12px">Use waivers to patch holes or re-sign waived talent for familiarity. A quick depth move can keep your roster flexible.</p></div></section></div>`;
 }
 function waiverPool() {
   const base = [
@@ -1351,10 +1458,13 @@ function simSeason() {
   render();
 }
 function nextGameBrief() {
-  const g = nextUnplayed();
+  const g = nextUserGame();
   if (!g)
     return `<div class="logItem"><b>Season complete</b><p class="muted">All scheduled games have been simulated. Review standings and recent finals in Season Command.</p></div>`;
-  return `<div class="logItem"><b>Next Game · Week ${g.week}</b><p class="muted">${teamMeta(g.away).name} at ${teamMeta(g.home).name}. ${g.home === S.team.abbr || g.away === S.team.abbr ? "Your rotation, cap choices and roster balance feed the sim engine." : "League game will update standings."}</p><button class="btn secondary" data-tab="schedule">Open Season Command</button></div>`;
+  const home = teamMeta(g.home);
+  const away = teamMeta(g.away);
+  const isHome = g.home === S.team.abbr;
+  return `<div class="logItem"><b>Next Game · Week ${g.week}</b><p class="muted">${escapeHtml(isHome ? away.name + " visits" : home.name + " hosts")} ${isHome ? "at home" : "on the road"}. ${escapeHtml(isHome ? "Use the crowd and matchups to your advantage." : "Travel and rotations will matter.")}</p><button class="btn secondary" data-tab="schedule">Open Season Command</button></div>`;
 }
 function standingsRows() {
   return leagueIds()
@@ -1785,6 +1895,8 @@ function actions(a) {
       render();
     }
   }
+  if (a === "exportSave") exportSave();
+  if (a === "importSave") importSave();
   if (a === "simNext") simNextGame();
   if (a === "simWeek") simWeek();
   if (a === "simSeason") simSeason();
@@ -1806,6 +1918,17 @@ function actions(a) {
     trade.otherGive = [];
     trade.userPick = 0;
     trade.otherPick = 0;
+    render();
+  }
+  if (a === "resetDraftFilters") {
+    draftFilters = {
+      q: "",
+      pos: "ALL",
+      team: "ALL",
+      risk: "ALL",
+      strength: "",
+      arch: "ALL",
+    };
     render();
   }
   if (a === "submitTrade") submitTrade();
@@ -1874,7 +1997,7 @@ function signPlayer(id) {
 function submitTrade() {
   const other = S.teams.find((t) => t.id === trade.team);
   const ev = evaluateTrade(other);
-  if (!ev.ok) return toast("Trade rejected.");
+  if (!ev.ok) return toast(ev.reason || "Trade rejected.");
   const give = S.roster.filter((p) => trade.userGive.includes(p.id));
   const get = other.players.filter((p) => trade.otherGive.includes(p.id));
   S.roster = S.roster
@@ -3254,12 +3377,13 @@ function adminView() {
               ]
                 .map(
                   (r, i) =>
-                    `<div class="checkRow"><div><b>${r.name}</b> <span class="pill">${r.pos}</span> <span class="pill">${r.archetype}</span><div class="mini">${r.team} · ${shortMoney(r.salary)} · upside ${r.ratings.potential}</div></div><button class="btn danger" data-rm-rookie="${y}|${i}">Remove</button></div>`,
+                    `<div class="checkRow"><div><b>${escapeHtml(r.name)}</b> <span class="pill">${escapeHtml(r.pos)}</span> <span class="pill">${escapeHtml(r.archetype)}</span><div class="mini">${escapeHtml(r.team)} · ${shortMoney(r.salary)} · upside ${r.ratings.potential}</div></div><button class="btn danger" data-rm-rookie="${y}|${i}">Remove</button></div>`,
+
                 )
                 .join("")}</div>`,
           )
           .join("");
-  return `<section class="card"><div class="sectionTitle"><h3>Add Custom Rookie</h3><span>Players added here join the named class for their draft year</span></div><div class="cardPad"><div class="layout2"><div><div class="field"><label>Name</label><input id="cr-name" placeholder="Player Name"></div><div class="field"><label>Position</label><select id="cr-pos">${POSITION_OPTIONS.map((p) => `<option value="${p}">${p}</option>`).join("")}</select></div><div class="field"><label>College / Origin</label><input id="cr-college" placeholder="UConn"></div><div class="field"><label>Draft Year</label><input id="cr-year" type="number" value="${nextYear}" min="${nextYear}"></div><div class="field"><label>Archetype</label><select id="cr-arch">${ARCHETYPE_OPTIONS.map((a) => `<option value="${a}">${a}</option>`).join("")}</select></div><div class="field"><label>Salary ($)</label><input id="cr-salary" type="number" value="400000" min="80000" step="10000"></div><div class="field"><label>Contract Years</label><input id="cr-years" type="number" value="4" min="1" max="4"></div></div><div><div class="ratingGrid">${ratingFields}</div><div class="field"><label>Scouting (optional)</label><textarea id="cr-scouting" rows="2" placeholder="Auto-filled from archetype if blank"></textarea></div><div class="field"><label>Strengths (optional)</label><input id="cr-strengths" placeholder="Auto-derived from top ratings if blank"></div><div class="field"><label>Weaknesses (optional)</label><input id="cr-weaknesses" placeholder="Auto-derived from low ratings if blank"></div><div class="actions"><button class="btn" data-action="addCustomRookie">Add to Draft Class</button></div></div></div><hr style="border:0;border-top:1px solid var(--line);margin:24px 0"><h3>Current Custom Rookies</h3>${list}</div></section>`;
+  return `<section class="card"><div class="sectionTitle"><h3>Add Custom Rookie</h3><span>Players added here join the named class for their draft year</span></div><div class="cardPad"><div class="layout2"><div><div class="field"><label>Name</label><input id="cr-name" placeholder="Player Name"></div><div class="field"><label>Position</label><select id="cr-pos">${POSITION_OPTIONS.map((p) => `<option value="${p}">${p}</option>`).join("")}</select></div><div class="field"><label>College / Origin</label><input id="cr-college" placeholder="UConn"></div><div class="field"><label>Draft Year</label><input id="cr-year" type="number" value="${nextYear}" min="${nextYear}"></div><div class="field"><label>Archetype</label><select id="cr-arch">${ARCHETYPE_OPTIONS.map((a) => `<option value="${a}">${a}</option>`).join("")}</select></div><div class="field"><label>Salary ($)</label><input id="cr-salary" type="number" value="400000" min="80000" step="10000"></div><div class="field"><label>Contract Years</label><input id="cr-years" type="number" value="4" min="1" max="4"></div></div><div><div class="ratingGrid">${ratingFields}</div><div class="field"><label>Scouting (optional)</label><textarea id="cr-scouting" rows="2" placeholder="Auto-filled from archetype if blank"></textarea></div><div class="field"><label>Strengths (optional)</label><input id="cr-strengths" placeholder="Auto-derived from top ratings if blank"></div><div class="field"><label>Weaknesses (optional)</label><input id="cr-weaknesses" placeholder="Auto-derived from low ratings if blank"></div><div class="actions"><button class="btn" data-action="addCustomRookie">Add to Draft Class</button></div></div></div><hr style="border:0;border-top:1px solid var(--line);margin:24px 0"><h3>Current Custom Rookies</h3>${list}<hr style="border:0;border-top:1px solid var(--line);margin:24px 0"><div class="sectionTitle"><h3>Save Management</h3><span>Export, import, or reset your local franchise save.</span></div><div class="cardPad"><div class="layout2"><button class="btn" data-action="exportSave">Export Save</button><button class="btn secondary" data-action="importSave">Import Save</button><button class="btn ghost" data-action="reset">Reset Save</button></div><div class="field"><label>Paste save JSON here</label><textarea id="saveImport" rows="4" placeholder="Paste exported save JSON"></textarea></div><div class="logItem">Save version <b>${S.saveVersion}</b> · Last saved <b>${S.lastSaved ? new Date(S.lastSaved).toLocaleString() : "unknown"}</b></div></div></div></section>`;
 }
 function readField(id) {
   const el = document.getElementById(id);

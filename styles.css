@@ -280,6 +280,10 @@ button {
   background: #e8f7ef;
   color: #116442;
 }
+.pill.info {
+  background: #e9eefc;
+  color: #1f4ecd;
+}
 .pill.warn {
   background: #fff1d9;
   color: #945604;
@@ -287,6 +291,28 @@ button {
 .pill.bad {
   background: #ffe9e5;
   color: #9b2419;
+}
+.tradeSummary {
+  display: grid;
+  gap: 18px;
+}
+.tradeAdvice ul {
+  margin: 12px 0 0;
+  padding-left: 18px;
+  color: var(--ink);
+}
+.tradeAdvice li {
+  margin-bottom: 8px;
+}
+.callout {
+  background: #fff8f2;
+  border: 1px solid #f0e0d2;
+  border-radius: 18px;
+  padding: 14px 16px;
+}
+.callout strong {
+  display: block;
+  margin-bottom: 8px;
 }
 .bar {
   height: 10px;
