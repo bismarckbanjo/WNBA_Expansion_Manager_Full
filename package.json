@@ -1,0 +1,12 @@
+{
+  "name": "wnba-manager",
+  "version": "1.0.0",
+  "description": "WNBA Expansion Manager — vanilla-JS browser game with a Node test harness.",
+  "private": true,
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "jsdom": "^24.0.0"
+  }
+}

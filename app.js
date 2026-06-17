@@ -153,17 +153,59 @@ function migrate(s) {
   (s.teams || []).forEach((t) => (t.players || []).forEach(ensureInjury));
   return s;
 }
+// Structural guard: a parseable-but-incomplete object (e.g. {}) survives migrate()
+// but would crash render() on the first S.team/S.roster access and brick the app.
+function isValidSave(s) {
+  return !!(
+    s &&
+    typeof s === "object" &&
+    s.team &&
+    typeof s.team === "object" &&
+    typeof s.team.city === "string" &&
+    Array.isArray(s.roster) &&
+    Array.isArray(s.teams)
+  );
+}
 function load() {
   try {
-    return migrate(JSON.parse(localStorage.getItem(LS_KEY)));
+    const parsed = migrate(JSON.parse(localStorage.getItem(LS_KEY)));
+    return isValidSave(parsed) ? parsed : null;
   } catch {
     return null;
   }
 }
 function save() {
+  if (_saveTimer) {
+    clearTimeout(_saveTimer);
+    _saveTimer = null;
+  }
   S.saveVersion = SAVE_VERSION;
   S.lastSaved = new Date().toISOString();
   localStorage.setItem(LS_KEY, JSON.stringify(S));
+}
+// Debounced autosave used by render() so rapid UI updates don't each pay for a
+// full serialize. Explicit save() calls (game actions) still persist immediately,
+// and a beforeunload flush guarantees nothing is lost on exit.
+let _saveTimer = null;
+function queueSave() {
+  if (_saveTimer) clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(() => {
+    _saveTimer = null;
+    save();
+  }, 400);
+}
+if (typeof window !== "undefined" && window.addEventListener) {
+  window.addEventListener("beforeunload", () => {
+    if (_saveTimer) save();
+  });
+  window.addEventListener("visibilitychange", () => {
+    if (
+      typeof document !== "undefined" &&
+      document.visibilityState === "hidden" &&
+      _saveTimer
+    )
+      save();
+  });
 }
 function exportSave() {
   const text = JSON.stringify(S, null, 2);
@@ -183,14 +225,15 @@ function importSave() {
   if (!raw.trim()) return toast("Paste JSON into the import box first.");
   try {
     const incoming = migrate(JSON.parse(raw));
-    if (!incoming) throw new Error("Invalid save data.");
+    if (!isValidSave(incoming))
+      throw new Error("Save is missing required fields.");
     S = incoming;
     tab = S.started ? "dashboard" : "setup";
     toast("Save imported successfully.");
     render();
   } catch (error) {
     console.error(error);
-    toast("Import failed: invalid save JSON.");
+    toast("Import failed: invalid or incomplete save JSON.");
   }
 }
 function toast(msg) {
@@ -214,9 +257,25 @@ function userSalary() {
 function teamSalary(team) {
   return team.players.reduce((a, p) => a + p.salary, 0);
 }
+// composite() is called thousands of times per render/sim (sorts, teamPower,
+// stat leaders). Memoize per pass via a WeakMap keyed by the player object; the
+// cache is reset at the start of render() and each simulateGame(), the only
+// points where ratings can have changed.
+let _compCache = new WeakMap();
+// teamPower() is pure within a single render pass (rosters/injuries don't change
+// mid-paint), so it's cached by team id only while rendering — _powerCacheOn is
+// false during simulation, where per-game injuries make caching across games wrong.
+let _powerCache = Object.create(null);
+let _powerCacheOn = false;
+function clearComputeCaches() {
+  _compCache = new WeakMap();
+  _powerCache = Object.create(null);
+}
 function composite(p) {
-  let r = p.ratings;
-  return Math.round(
+  const hit = _compCache.get(p);
+  if (hit !== undefined) return hit;
+  const r = p.ratings;
+  const v = Math.round(
     r.scoring * 0.19 +
       r.shooting * 0.14 +
       r.playmaking * 0.14 +
@@ -226,6 +285,8 @@ function composite(p) {
       r.iq * 0.09 +
       r.potential * 0.05,
   );
+  _compCache.set(p, v);
+  return v;
 }
 function visibleGrade(p) {
   const c = composite(p);
@@ -303,6 +364,9 @@ function restoreFocus(info) {
 }
 function render() {
   const focusInfo = captureFocus();
+  // Caches are valid for the duration of a single paint only.
+  clearComputeCaches();
+  _powerCacheOn = true;
   ensureSeason();
   checkObjectives();
   document.documentElement.style.setProperty("--user1", S.team.primary);
@@ -310,7 +374,10 @@ function render() {
   root().innerHTML = S.started ? shell() : setupPage();
   bind();
   restoreFocus(focusInfo);
-  save();
+  _powerCacheOn = false;
+  // Persist off the hot path: a full JSON.stringify(S) + localStorage write on
+  // every keystroke/tab click was the single biggest cost. Debounced instead.
+  queueSave();
 }
 function shell() {
   return `<div class="appShell"><aside class="side"><div class="brand"><div class="logo"></div><div><h1>${escapeHtml(S.team.city)} ${escapeHtml(S.team.nickname)}</h1><p>Expansion Front Office</p></div></div><nav class="nav">${navBtn("dashboard", "Dashboard")} ${navBtn("draft", "Expansion Draft")} ${navBtn("roster", "Roster")} ${navBtn("schedule", "Season")} ${navBtn("trades", "Trade Desk")} ${navBtn("waivers", "Waivers")} ${navBtn("coaching", "Coaching")} ${navBtn("league", "League")} ${navBtn("admin", "Admin")}</nav><div class="sideCard"><div class="mini">Front Office Score</div><div class="big">${frontOfficeScore()}</div><p>${frontOfficeNote()}</p><p class="mini">${frontOfficeDrivers()}</p></div></aside><main class="main">${topbar()}${content()}${modalHtml()}</main></div>`;
@@ -470,9 +537,10 @@ function rosterBalance() {
   if (!S.roster.length)
     return { identity: "None", note: "Draft players to establish a style" };
   const pairs = Object.entries(r).sort((a, b) => b[1] - a[1]);
+  const last = pairs[pairs.length - 1];
   return {
     identity: pairs[0][0],
-    note: `Best area ${pairs[0][1]}, weakest ${pairs[pairs.length - 2][0]} ${pairs[pairs.length - 2][1]}`,
+    note: `Best area ${pairs[0][1]}, weakest ${last[0]} ${last[1]}`,
   };
 }
 function teamLetter(x) {
@@ -563,13 +631,13 @@ function playerDraftCard(p) {
     p.protected ||
     S.roster.length >= DATA.expansionPickLimit ||
     userSalary() + p.salary > DATA.cap;
-  return `<div class="playerCard">${portraitHtml(p)}<div><div><span class="playerName">${p.name}</span> <span class="pill">${p.pos}</span> <span class="pill" style="background:${p.teamObj.primary};color:white">${p.team}</span> ${p.protected ? '<span class="pill bad">Protected</span>' : ""}</div><div class="scout">${p.scouting}</div><div class="tags"><span class="tag">${visibleGrade(p)}</span><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${p.years} yr</span><span class="tag">${p.archetype}</span><span class="tag">Strength: ${p.strengths.split(",")[0]}</span><span class="tag">Weakness: ${p.weaknesses.split(",")[0]}</span></div></div><div class="actions"><button class="btn secondary" data-view="${p.id}">Scout</button><button class="btn ${disabled ? "secondary" : ""}" ${disabled ? "disabled" : ""} data-draft="${p.id}">${p.protected ? "Locked" : userSalary() + p.salary > DATA.cap ? "No Cap" : "Draft"}</button></div></div>`;
+  return `<div class="playerCard">${portraitHtml(p)}<div><div><span class="playerName">${escapeHtml(p.name)}</span> <span class="pill">${escapeHtml(p.pos)}</span> <span class="pill" style="background:${p.teamObj.primary};color:white">${escapeHtml(p.team)}</span> ${p.protected ? '<span class="pill bad">Protected</span>' : ""}</div><div class="scout">${escapeHtml(p.scouting)}</div><div class="tags"><span class="tag">${visibleGrade(p)}</span><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${p.years} yr</span><span class="tag">${escapeHtml(p.archetype)}</span><span class="tag">Strength: ${escapeHtml(p.strengths.split(",")[0])}</span><span class="tag">Weakness: ${escapeHtml(p.weaknesses.split(",")[0])}</span></div></div><div class="actions"><button class="btn secondary" data-view="${p.id}">Scout</button><button class="btn ${disabled ? "secondary" : ""}" ${disabled ? "disabled" : ""} data-draft="${p.id}">${p.protected ? "Locked" : userSalary() + p.salary > DATA.cap ? "No Cap" : "Draft"}</button></div></div>`;
 }
 function roster() {
   return `${kpis()}<div class="layout2"><section class="card"><div class="sectionTitle"><h3>Cap Sheet</h3><span>${money(userSalary())} / ${money(DATA.cap)}</span></div>${rosterTable(S.roster)}</section><section class="card"><div class="sectionTitle"><h3>Roster Tools</h3><span>rotation control</span></div><div class="cardPad"><div class="impact">${impactBars()}</div><hr style="border:0;border-top:1px solid var(--line);margin:18px 0"><h3>Position Balance</h3>${positionBalance()}<h3>Recommended Next Move</h3><p class="muted">${recommendation()}</p></div></section></div>`;
 }
 function rosterTable(players) {
-  return `<table class="table"><thead><tr><th>Player</th><th>Pos</th><th>Role</th><th>Salary</th><th>Contract</th><th></th></tr></thead><tbody>${players.map((p) => `<tr><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div><div class="playerName">${p.name}</div><div class="mini">${p.archetype} · ${p.strengths.split(",")[0]} · ${p.weaknesses.split(",")[0]}</div></div></div></td><td>${p.pos}</td><td><span class="pill">${visibleGrade(p)}</span></td><td>${shortMoney(p.salary)}</td><td>${p.years} yr</td><td><button class="btn secondary" data-view="${p.id}">Scout</button> ${S.roster.find((x) => x.id === p.id) ? `<button class="btn danger" data-waive="${p.id}">Waive</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="6"><div class="empty">No players yet.</div></td></tr>`}</tbody></table>`;
+  return `<table class="table"><thead><tr><th>Player</th><th>Pos</th><th>Role</th><th>Salary</th><th>Contract</th><th></th></tr></thead><tbody>${players.map((p) => `<tr><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div><div class="playerName">${escapeHtml(p.name)}</div><div class="mini">${escapeHtml(p.archetype)} · ${escapeHtml(p.strengths.split(",")[0])} · ${escapeHtml(p.weaknesses.split(",")[0])}</div></div></div></td><td>${escapeHtml(p.pos)}</td><td><span class="pill">${visibleGrade(p)}</span></td><td>${shortMoney(p.salary)}</td><td>${p.years} yr</td><td><button class="btn secondary" data-view="${p.id}">Scout</button> ${S.roster.find((x) => x.id === p.id) ? `<button class="btn danger" data-waive="${p.id}">Waive</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="6"><div class="empty">No players yet.</div></td></tr>`}</tbody></table>`;
 }
 function positionBalance() {
   return ["G", "F", "C"]
@@ -629,7 +697,7 @@ function trades() {
     F: "forwards",
     C: "centers",
   }[teamNeed(other)] || "players";
-  return `${kpis()}<section class="card"><div class="sectionTitle"><h3>Trade Machine</h3><span>salary, value, team need, protected-player logic</span></div><div class="cardPad"><div class="layout2"><div class="field"><label>Trade partner</label><select data-trade-team>${S.teams.map((t) => `<option value="${t.id}" ${trade.team === t.id ? "selected" : ""}>${t.name} · ${t.status}</option>`).join("")}</select><div class="mini">Partner need: ${partnerNeedLabel}. Protected players are expensive; prioritize fit and future value.</div></div><div class="field"><label>Filter players (name, strength, archetype, position)</label><input data-trade-query placeholder="e.g. shooting" value="${trade.query || ""}"></div></div><div class="tradeBox"><div class="tradePanel"><div class="sectionTitle"><h3>${S.team.nickname} sends</h3><span>${shortMoney(sumSelected(S.roster, trade.userGive))}</span></div><div class="tradeList">${userList.map((p) => checkRow(p, "userGive")).join("") || '<div class="empty">No roster players match.</div>'}</div><div class="cardPad"><label><input type="checkbox" data-pick="user" ${trade.userPick ? "checked" : ""}> Include your future 1st-round pick</label></div></div><div class="tradePanel"><div class="sectionTitle"><h3>${other.name} sends</h3><span>${shortMoney(sumSelected(other.players, trade.otherGive))}</span></div><div class="tradeList">${otherList.map((p) => checkRow(p, "otherGive")).join("") || '<div class="empty">No partner players match.</div>'}</div><div class="cardPad"><label><input type="checkbox" data-pick="other" ${trade.otherPick ? "checked" : ""}> Request their future 2nd-round pick</label></div></div></div><div class="tradeSummary"><div class="logItem"><b>Trade Verdict: <span class="pill ${evaln.ok ? (evaln.label === "Strong Offer" ? "good" : evaln.label === "Good Offer" ? "info" : evaln.label === "Close Offer" ? "warn" : "good") : "warn"}">${evaln.label}</span></b><p class="muted">${evaln.reason}</p><div class="meter"><span>Your outgoing value</span><div class="bar"><i style="width:${Math.min(100, evaln.userValue / 20)}%"></i></div><b>${evaln.userValue}</b></div><div class="meter"><span>Partner outgoing value</span><div class="bar"><i style="width:${Math.min(100, evaln.otherValue / 20)}%"></i></div><b>${evaln.otherValue}</b></div></div>${evaln.advice && evaln.advice.length ? `<div class="tradeAdvice"><h4>Why this verdict?</h4><ul>${evaln.advice.map((item) => `<li>${item}</li>`).join("")}</ul></div>` : ""}</div><div class="actions"><button class="btn" data-action="submitTrade" ${evaln.ok ? "" : "disabled"}>Submit Trade</button><button class="btn secondary" data-action="clearTrade">Clear Selections</button></div></div></section>`;
+  return `${kpis()}<section class="card"><div class="sectionTitle"><h3>Trade Machine</h3><span>salary, value, team need, protected-player logic</span></div><div class="cardPad"><div class="layout2"><div class="field"><label>Trade partner</label><select data-trade-team>${S.teams.map((t) => `<option value="${t.id}" ${trade.team === t.id ? "selected" : ""}>${t.name} · ${t.status}</option>`).join("")}</select><div class="mini">Partner need: ${partnerNeedLabel}. Protected players are expensive; prioritize fit and future value.</div></div><div class="field"><label>Filter players (name, strength, archetype, position)</label><input data-trade-query placeholder="e.g. shooting" value="${trade.query || ""}"></div></div><div class="tradeBox"><div class="tradePanel"><div class="sectionTitle"><h3>${escapeHtml(S.team.nickname)} sends</h3><span>${shortMoney(sumSelected(S.roster, trade.userGive))}</span></div><div class="tradeList">${userList.map((p) => checkRow(p, "userGive")).join("") || '<div class="empty">No roster players match.</div>'}</div><div class="cardPad"><label><input type="checkbox" data-pick="user" ${trade.userPick ? "checked" : ""}> Include your future 1st-round pick</label></div></div><div class="tradePanel"><div class="sectionTitle"><h3>${other.name} sends</h3><span>${shortMoney(sumSelected(other.players, trade.otherGive))}</span></div><div class="tradeList">${otherList.map((p) => checkRow(p, "otherGive")).join("") || '<div class="empty">No partner players match.</div>'}</div><div class="cardPad"><label><input type="checkbox" data-pick="other" ${trade.otherPick ? "checked" : ""}> Request their future 2nd-round pick</label></div></div></div><div class="tradeSummary"><div class="logItem"><b>Trade Verdict: <span class="pill ${evaln.ok ? (evaln.label === "Strong Offer" ? "good" : evaln.label === "Good Offer" ? "info" : evaln.label === "Close Offer" ? "warn" : "good") : "warn"}">${evaln.label}</span></b><p class="muted">${evaln.reason}</p><div class="meter"><span>Your outgoing value</span><div class="bar"><i style="width:${Math.min(100, evaln.userValue / 20)}%"></i></div><b>${evaln.userValue}</b></div><div class="meter"><span>Partner outgoing value</span><div class="bar"><i style="width:${Math.min(100, evaln.otherValue / 20)}%"></i></div><b>${evaln.otherValue}</b></div></div>${evaln.advice && evaln.advice.length ? `<div class="tradeAdvice"><h4>Why this verdict?</h4><ul>${evaln.advice.map((item) => `<li>${item}</li>`).join("")}</ul></div>` : ""}</div><div class="actions"><button class="btn" data-action="submitTrade" ${evaln.ok ? "" : "disabled"}>Submit Trade</button><button class="btn secondary" data-action="clearTrade">Clear Selections</button></div></div></section>`;
 }
 function checkRow(p, side) {
   const checked = trade[side].includes(p.id);
@@ -744,13 +812,15 @@ function waivers() {
     ? pool
         .map(
           (p) =>
-            `<div class="playerCard">${portraitHtml(p)}<div><span class="playerName">${p.name}</span> <span class="pill">${p.pos}</span><div class="scout">${p.scouting}</div><div class="tags"><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${visibleGrade(p)}</span><span class="tag">${p.strengths.split(",")[0]}</span></div></div><button class="btn" data-sign="${p.id}">${userSalary() + p.salary > DATA.cap ? "No Cap" : "Sign"}</button></div>`,
+            `<div class="playerCard">${portraitHtml(p)}<div><span class="playerName">${escapeHtml(p.name)}</span> <span class="pill">${escapeHtml(p.pos)}</span><div class="scout">${escapeHtml(p.scouting)}</div><div class="tags"><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${visibleGrade(p)}</span><span class="tag">${escapeHtml(p.strengths.split(",")[0])}</span></div></div><button class="btn" data-sign="${p.id}">${userSalary() + p.salary > DATA.cap ? "No Cap" : "Sign"}</button></div>`,
         )
         .join("")
-    : '<div class="empty">No available free agents right now. Check back after roster moves or widen your criteria.</div>'}</div></section><section class="card"><div class="sectionTitle"><h3>Your Waived Players</h3><span>${S.waived.length}</span></div><div class="board">${S.waived.map((p) => `<div class="playerCard">${portraitHtml(p, "sm")}<div><b>${p.name}</b><div class="mini">${p.pos} · ${shortMoney(p.salary)}</div></div><button class="btn secondary" data-sign="${p.id}">Re-sign</button></div>`).join("") || '<div class="empty">No waived players yet. Waive a player to open cap space or reshape your roster.</div>'}</div><div class="cardPad callout"><div class="actions" style="justify-content:flex-start;gap:10px"><button class="btn secondary" data-tab="roster">Review roster</button><button class="btn secondary" data-tab="draft">Browse draft pool</button></div><p class="muted" style="margin-top:12px">Use waivers to patch holes or re-sign waived talent for familiarity. A quick depth move can keep your roster flexible.</p></div></section></div>`;
+    : '<div class="empty">No available free agents right now. Check back after roster moves or widen your criteria.</div>'}</div></section><section class="card"><div class="sectionTitle"><h3>Your Waived Players</h3><span>${S.waived.length}</span></div><div class="board">${S.waived.map((p) => `<div class="playerCard">${portraitHtml(p, "sm")}<div><b>${escapeHtml(p.name)}</b><div class="mini">${escapeHtml(p.pos)} · ${shortMoney(p.salary)}</div></div><button class="btn secondary" data-sign="${p.id}">Re-sign</button></div>`).join("") || '<div class="empty">No waived players yet. Waive a player to open cap space or reshape your roster.</div>'}</div><div class="cardPad callout"><div class="actions" style="justify-content:flex-start;gap:10px"><button class="btn secondary" data-tab="roster">Review roster</button><button class="btn secondary" data-tab="draft">Browse draft pool</button></div><p class="muted" style="margin-top:12px">Use waivers to patch holes or re-sign waived talent for familiarity. A quick depth move can keep your roster flexible.</p></div></section></div>`;
 }
+let _faBase = null;
 function waiverPool() {
-  const base = [
+  if (!_faBase)
+    _faBase = [
     p(
       "Morgan Tuck",
       "F",
@@ -852,9 +922,13 @@ function waiverPool() {
       "engine",
     ),
   ];
-  return base
-    .concat(S.waived)
-    .filter((v, i, a) => a.findIndex((x) => x.id === v.id) === i);
+  // Dedupe by id in O(n) (a waived player can match a base FA id).
+  const seen = new Set();
+  return _faBase.concat(S.waived).filter((v) => {
+    if (seen.has(v.id)) return false;
+    seen.add(v.id);
+    return true;
+  });
 }
 function league() {
   return `<div class="layout3">${S.teams
@@ -887,7 +961,7 @@ function statsLeadersSection() {
       .slice(0, 5)
       .map(
         (x, i) =>
-          `<tr><td>${i + 1}</td><td><div style="display:flex;gap:8px;align-items:center">${portraitHtml(x.p, "sm")}<div><div class="playerName">${x.p.name}</div><div class="mini">${x.teamId} · ${x.p.seasonStats.gp} GP</div></div></div></td><td><b>${fmt(per(x, key))}</b></td></tr>`,
+          `<tr><td>${i + 1}</td><td><div style="display:flex;gap:8px;align-items:center">${portraitHtml(x.p, "sm")}<div><div class="playerName">${escapeHtml(x.p.name)}</div><div class="mini">${escapeHtml(x.teamId)} · ${x.p.seasonStats.gp} GP</div></div></div></td><td><b>${fmt(per(x, key))}</b></td></tr>`,
       )
       .join("");
   const table = (key, label, fmt) =>
@@ -983,15 +1057,22 @@ function generateSchedule() {
   );
   return games.sort((a, b) => a.week - b.week || a.id.localeCompare(b.id));
 }
-function teamPower(id) {
-  const meta = teamMeta(id);
-  // Injured players are unavailable and don't contribute to the lineup.
-  const players = meta.players
+// Shared helper: the available (non-injured) rotation, best-first, capped at n.
+// Used by teamPower, distributeAndRecord, rollInjuries and the Game Day view.
+function healthyRotation(players, n) {
+  const sorted = players
     .slice()
     .filter((p) => !p.injury)
     .sort((a, b) => composite(b) - composite(a));
-  if (!players.length)
-    return {
+  return n == null ? sorted : sorted.slice(0, n);
+}
+function teamPower(id) {
+  if (_powerCacheOn && _powerCache[id]) return _powerCache[id];
+  const meta = teamMeta(id);
+  // Injured players are unavailable and don't contribute to the lineup.
+  const players = healthyRotation(meta.players);
+  if (!players.length) {
+    const empty = {
       overall: 55,
       off: 55,
       def: 55,
@@ -1003,6 +1084,9 @@ function teamPower(id) {
       intD: 55,
       depth: 0,
     };
+    if (_powerCacheOn) _powerCache[id] = empty;
+    return empty;
+  }
   const top = players.slice(0, 8);
   // Heavier top-player weighting: top 3 carry ~63% of the team rating,
   // so star concentration matters more than bench depth.
@@ -1046,7 +1130,7 @@ function teamPower(id) {
   const off = Math.round((perO + intO) / 2);
   const def = Math.round((perD + intD) / 2);
   const reb = wavg("rebounding");
-  return {
+  const result = {
     overall: Math.round(off * 0.45 + def * 0.4 + reb * 0.15),
     off,
     def,
@@ -1058,6 +1142,8 @@ function teamPower(id) {
     intD,
     depth: meta.players.length,
   };
+  if (_powerCacheOn) _powerCache[id] = result;
+  return result;
 }
 function rand(min, max) {
   return Math.floor(min + Math.random() * (max - min + 1));
@@ -1175,7 +1261,11 @@ function simScore(home, away, game) {
   const aBase = aPer + aInt + aRebEdge;
   let hs = Math.max(58, Math.round(hBase + rand(-7 - hThin, 8 + hThin)));
   let as = Math.max(55, Math.round(aBase + rand(-7 - aThin, 8 + aThin)));
-  if (hs === as) hs += rand(1, 5);
+  // Break ties without a systematic home bias: pick the winner randomly.
+  if (hs === as) {
+    if (Math.random() < 0.5) hs += rand(1, 5);
+    else as += rand(1, 5);
+  }
   return { hs, as, hp, ap };
 }
 // Dev helper: run N seasons over the current schedule and print win-rate by team.
@@ -1218,39 +1308,35 @@ window.simTest = function (seasons = 20) {
 // Returns top-3 box-score lines for backward-compat display.
 function distributeAndRecord(id, ptsFor, won) {
   const team = teamMeta(id);
-  const healthy = team.players
-    .slice()
-    .filter((p) => !p.injury)
-    .sort((a, b) => composite(b) - composite(a))
-    .slice(0, 8);
+  const healthy = healthyRotation(team.players, 8);
   if (!healthy.length) return [];
-  let remaining = Math.max(40, ptsFor);
-  const rotation = [];
-  healthy.slice(0, 3).forEach((p, i) => {
-    const pts = i === 0 ? rand(16, 28) : i === 1 ? rand(11, 21) : rand(7, 16);
-    remaining -= pts;
-    rotation.push({
-      player: p,
-      pts,
-      reb: rand(p.pos.includes("C") ? 5 : 2, p.pos.includes("G") ? 7 : 11),
-      ast: rand(p.pos.includes("G") ? 4 : 1, p.pos.includes("C") ? 4 : 8),
-    });
+  const total = Math.max(0, Math.round(ptsFor));
+  // Weight each player's scoring share by rotation slot and scoring rating (plus
+  // light noise), then apportion integer points that sum EXACTLY to the team's
+  // score. The previous version handed stars fixed chunks and let the remainder
+  // go negative, so the box score never reconciled to the scoreboard.
+  const slotW = [1.0, 0.82, 0.66, 0.5, 0.4, 0.3, 0.22, 0.16];
+  const weights = healthy.map((p, i) => {
+    const sc = (p.ratings && p.ratings.scoring) || 60;
+    return (slotW[i] ?? 0.14) * (0.6 + sc / 100) * (0.85 + Math.random() * 0.3);
   });
-  const bench = healthy.slice(3);
-  bench.forEach((p) => {
-    const share = Math.max(
-      0,
-      Math.round(remaining / Math.max(1, bench.length)),
-    );
-    const pts = Math.max(0, Math.min(14, share + rand(-2, 4)));
-    remaining -= pts;
-    rotation.push({
-      player: p,
-      pts,
-      reb: rand(0, p.pos.includes("C") ? 5 : 3),
-      ast: rand(0, p.pos.includes("G") ? 3 : 2),
-    });
-  });
+  const wSum = weights.reduce((a, b) => a + b, 0) || 1;
+  const raw = weights.map((w) => (w / wSum) * total);
+  const pts = raw.map((x) => Math.floor(x));
+  // Largest-remainder method: hand out the leftover points to the largest
+  // fractional shares so the totals are exact.
+  let leftover = total - pts.reduce((a, b) => a + b, 0);
+  const order = raw
+    .map((x, i) => ({ i, frac: x - Math.floor(x) }))
+    .sort((a, b) => b.frac - a.frac);
+  for (let k = 0; k < leftover && order.length; k++)
+    pts[order[k % order.length].i] += 1;
+  const rotation = healthy.map((p, i) => ({
+    player: p,
+    pts: pts[i],
+    reb: rand(p.pos.includes("C") ? 5 : 2, p.pos.includes("G") ? 7 : 11),
+    ast: rand(p.pos.includes("G") ? 4 : 1, p.pos.includes("C") ? 4 : 8),
+  }));
   rotation.forEach((r) => {
     if (!r.player.seasonStats)
       r.player.seasonStats = { gp: 0, pts: 0, reb: 0, ast: 0, w: 0 };
@@ -1260,13 +1346,18 @@ function distributeAndRecord(id, ptsFor, won) {
     r.player.seasonStats.ast += r.ast;
     if (won) r.player.seasonStats.w += 1;
   });
-  return rotation.slice(0, 3).map((r) => ({
-    name: r.player.name,
-    pos: r.player.pos,
-    pts: r.pts,
-    reb: r.reb,
-    ast: r.ast,
-  }));
+  // Box score shows the top three scorers (not just the highest-rated players).
+  return rotation
+    .slice()
+    .sort((a, b) => b.pts - a.pts)
+    .slice(0, 3)
+    .map((r) => ({
+      name: r.player.name,
+      pos: r.player.pos,
+      pts: r.pts,
+      reb: r.reb,
+      ast: r.ast,
+    }));
 }
 function resetSeasonStats() {
   const z = (p) => {
@@ -1285,6 +1376,9 @@ function snapshotComposites() {
 }
 function simulateGame(g) {
   if (!g || g.played) return;
+  // Ratings can change between games (dev growth), so the composite cache from a
+  // prior game must be dropped before this one.
+  clearComputeCaches();
   const r = simScore(g.home, g.away, g);
   rollInjuries(g);
   const winner = r.hs > r.as ? g.home : g.away;
@@ -1454,7 +1548,9 @@ function simWeek() {
 function simSeason() {
   ensureSeason();
   S.season.schedule.filter((x) => !x.played).forEach(simulateGame);
-  S.week = 17;
+  // Derive the week from the schedule rather than hardcoding 17, so the topbar
+  // stays correct regardless of schedule length.
+  S.week = Math.max(...S.season.schedule.map((x) => x.week), S.week) + 1;
   render();
 }
 function nextGameBrief() {
@@ -1579,7 +1675,7 @@ function gameDayView() {
     ? `<div class="impact" style="margin-top:10px"><div class="impactRow"><span>Per O</span><div class="bar"><i style="width:${oppPower.perO}%"></i></div><b>${oppPower.perO}</b></div><div class="impactRow"><span>Per D</span><div class="bar"><i style="width:${oppPower.perD}%"></i></div><b>${oppPower.perD}</b></div><div class="impactRow"><span>Int O</span><div class="bar"><i style="width:${oppPower.intO}%"></i></div><b>${oppPower.intO}</b></div><div class="impactRow"><span>Int D</span><div class="bar"><i style="width:${oppPower.intD}%"></i></div><b>${oppPower.intD}</b></div></div><p class="muted" style="margin-top:8px">${recLine}</p>`
     : `<div style="margin-top:10px"><button class="btn" data-scout="${g.id}">Scout Opponent</button><p class="muted" style="margin-top:8px">Skipping the scout means flying blind. You can still set a plan, but you won't know which lane to defend.</p></div>`;
   const planBlock = `<div class="actions" style="margin-top:10px"><button class="btn ${gp.plan === "pack" ? "" : "secondary"}" data-plan="${g.id}|pack">Pack the Paint</button><button class="btn ${gp.plan === "extend" ? "" : "secondary"}" data-plan="${g.id}|extend">Extend Defense</button>${gp.plan ? `<button class="btn ghost" data-plan="${g.id}|none">Clear</button>` : ""}</div>`;
-  const rotationTable = `<table class="table"><thead><tr><th>Player</th><th>Pos</th><th>Status</th><th>Mood</th></tr></thead><tbody>${topRotation.map((p) => `<tr style="${p.injury ? "opacity:.5" : ""}"><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div class="playerName">${p.name}</div></div></td><td>${p.pos}</td><td>${injuryBadge(p)}</td><td>${p.mood || 60}</td></tr>`).join("")}</tbody></table>`;
+  const rotationTable = `<table class="table"><thead><tr><th>Player</th><th>Pos</th><th>Status</th><th>Mood</th></tr></thead><tbody>${topRotation.map((p) => `<tr style="${p.injury ? "opacity:.5" : ""}"><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div class="playerName">${escapeHtml(p.name)}</div></div></td><td>${escapeHtml(p.pos)}</td><td>${injuryBadge(p)}</td><td>${p.mood || 60}</td></tr>`).join("")}</tbody></table>`;
   return `<section class="card"><div class="sectionTitle"><h3>Game Day · Week ${g.week} · ${isHome ? "vs" : "at"} ${opp.name}</h3><span>${opp.id} ${oppRec.w}-${oppRec.l}</span></div><div class="cardPad"><div class="layout2"><section><h3 style="margin-top:0">Opponent</h3><p class="muted">${opp.name} · ${oppRec.w}-${oppRec.l} · power index ${oppPower.overall}</p>${scoutBlock}<h3 style="margin-top:18px">Your Game Plan</h3>${planBlock}</section><section><h3 style="margin-top:0">Your Prep</h3><p class="muted">Weekly Focus: <b>${currentFocusLabel()}</b></p><p class="muted">Plan: <b>${gp.plan === "pack" ? "Pack the Paint" : gp.plan === "extend" ? "Extend Defense" : "Not set"}</b></p><p class="muted">Power Index: <b>${myPower.overall}</b> · Per ${myPower.perO}/${myPower.perD} · Int ${myPower.intO}/${myPower.intD}</p><p class="muted">Injured players: <b>${injuredCount}</b></p></section></div><h3 style="margin-top:18px">Top-8 Rotation</h3>${rotationTable}<div class="actions" style="margin-top:18px"><button class="btn" data-action="playQueuedGame" style="font-size:15px;padding:14px 20px">Play Game →</button><button class="btn secondary" data-action="closeGameDay">Hold Off</button></div></div></section>`;
 }
 function findAnyGame(gameId) {
@@ -1622,8 +1718,8 @@ function postGameView() {
     ? `<div class="logItem" style="border-color:var(--orange);background:#fff6ee;margin-top:18px"><b>${press.headline}</b><p class="muted">${press.body}</p><div class="actions" style="flex-direction:column;align-items:stretch;gap:8px">${press.options.map((o) => `<button class="btn secondary" data-press="${o.id}" style="text-align:left">${o.text}</button>`).join("")}</div></div>`
     : "";
   const boxRow = (p) =>
-    `<div class="checkRow"><div><b>${p.name}</b> <span class="pill">${p.pos}</span><div class="mini">${p.pts} pts · ${p.reb} reb · ${p.ast} ast</div></div></div>`;
-  return `<section class="card"><div class="sectionTitle"><h3>${headline}</h3><span>Week ${g.week}</span></div><div class="cardPad"><div style="display:flex;gap:24px;justify-content:center;align-items:center;padding:24px;background:${bannerBg};border:2px solid ${bannerBorder};border-radius:18px;margin-bottom:18px"><div style="text-align:center;min-width:140px"><div style="font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:800">${isHome ? "Home" : "Away"}</div><div style="font-size:18px;font-weight:800">${S.team.nickname}</div><div style="font-size:56px;font-weight:900;letter-spacing:-.04em;color:${won ? "var(--green)" : "var(--ink)"}">${userScore}</div></div><div style="font-size:22px;color:var(--muted);font-weight:800">vs</div><div style="text-align:center;min-width:140px"><div style="font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:800">${isHome ? "Away" : "Home"}</div><div style="font-size:18px;font-weight:800">${opp.name}</div><div style="font-size:56px;font-weight:900;letter-spacing:-.04em;color:${!won ? "var(--green)" : "var(--ink)"}">${oppScore}</div></div></div>${pressBlock}<div class="layout2" style="margin-top:18px"><section><h3>${S.team.nickname} top performers</h3>${userBox.map(boxRow).join("")}</section><section><h3>${opp.name} top performers</h3>${oppBox.map(boxRow).join("")}</section></div><div class="actions" style="margin-top:20px"><button class="btn" data-action="closePostGame" style="font-size:15px;padding:14px 20px">Continue →</button></div></div></section>`;
+    `<div class="checkRow"><div><b>${escapeHtml(p.name)}</b> <span class="pill">${escapeHtml(p.pos)}</span><div class="mini">${p.pts} pts · ${p.reb} reb · ${p.ast} ast</div></div></div>`;
+  return `<section class="card"><div class="sectionTitle"><h3>${headline}</h3><span>Week ${g.week}</span></div><div class="cardPad"><div style="display:flex;gap:24px;justify-content:center;align-items:center;padding:24px;background:${bannerBg};border:2px solid ${bannerBorder};border-radius:18px;margin-bottom:18px"><div style="text-align:center;min-width:140px"><div style="font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:800">${isHome ? "Home" : "Away"}</div><div style="font-size:18px;font-weight:800">${escapeHtml(S.team.nickname)}</div><div style="font-size:56px;font-weight:900;letter-spacing:-.04em;color:${won ? "var(--green)" : "var(--ink)"}">${userScore}</div></div><div style="font-size:22px;color:var(--muted);font-weight:800">vs</div><div style="text-align:center;min-width:140px"><div style="font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:800">${isHome ? "Away" : "Home"}</div><div style="font-size:18px;font-weight:800">${opp.name}</div><div style="font-size:56px;font-weight:900;letter-spacing:-.04em;color:${!won ? "var(--green)" : "var(--ink)"}">${oppScore}</div></div></div>${pressBlock}<div class="layout2" style="margin-top:18px"><section><h3>${escapeHtml(S.team.nickname)} top performers</h3>${userBox.map(boxRow).join("")}</section><section><h3>${opp.name} top performers</h3>${oppBox.map(boxRow).join("")}</section></div><div class="actions" style="margin-top:20px"><button class="btn" data-action="closePostGame" style="font-size:15px;padding:14px 20px">Continue →</button></div></div></section>`;
 }
 function seasonKpis() {
   const r = seasonRecord(S.team.abbr);
@@ -1666,11 +1762,14 @@ function recentResults() {
   if (!ids.length) return '<div class="empty">No games simulated yet.</div>';
   return ids
     .map((id) => {
-      const g = S.season.schedule.find((x) => x.id === id);
+      // Results can include playoff game ids, which live outside S.season.schedule —
+      // findAnyGame resolves both regular-season and playoff games.
+      const g = findAnyGame(id);
+      if (!g) return "";
       const top = [...(g.box?.away || []), ...(g.box?.home || [])].sort(
         (a, b) => b.pts - a.pts,
       )[0];
-      return `<div class="logItem"><b>${teamMeta(g.away).id} ${g.awayScore} @ ${teamMeta(g.home).id} ${g.homeScore}</b><p class="muted">Winner: ${teamMeta(g.winner).name}. Top line: ${top?.name || "—"} · ${top?.pts || 0} pts, ${top?.reb || 0} reb, ${top?.ast || 0} ast.</p></div>`;
+      return `<div class="logItem"><b>${teamMeta(g.away).id} ${g.awayScore} @ ${teamMeta(g.home).id} ${g.homeScore}</b><p class="muted">Winner: ${teamMeta(g.winner).name}. Top line: ${top?.name ? escapeHtml(top.name) : "—"} · ${top?.pts || 0} pts, ${top?.reb || 0} reb, ${top?.ast || 0} ast.</p></div>`;
     })
     .join("");
 }
@@ -1681,12 +1780,28 @@ function setupPage() {
 function abbr(city, nick) {
   return ((city || "").slice(0, 1) + (nick || "").slice(0, 2)).toUpperCase();
 }
+// Guarantee the user team id can't collide with an existing NPC team id, which
+// would make leagueIds()/teamMeta()/standings conflate two teams (self-games,
+// double-counted records). Falls back through letters then a numeric suffix.
+function uniqueUserAbbr(city, nick) {
+  const taken = new Set((DATA.teams || []).map((t) => t.id));
+  let base = abbr(city, nick) || "EXP";
+  if (!taken.has(base)) return base;
+  const cityLetter = (city || "X").slice(0, 1).toUpperCase();
+  for (let i = 0; i < 26; i++) {
+    const cand = (cityLetter + String.fromCharCode(65 + i) + "X").slice(0, 3);
+    if (!taken.has(cand)) return cand;
+  }
+  let n = 1;
+  while (taken.has(base.slice(0, 2) + n)) n++;
+  return base.slice(0, 2) + n;
+}
 function modalHtml() {
   if (!modal) return "";
   if (modal.type === "player") {
     const p = findPlayer(modal.id);
     if (!p) return "";
-    return `<div class="modalShade"><div class="modal"><div class="modalHeader"><div style="display:flex;gap:14px;align-items:center">${portraitHtml(p, "lg")}<h3>${p.name} <span class="pill">${p.pos}</span></h3></div><button class="close" data-close>Close</button></div><div class="modalBody"><p>${p.scouting}</p><div class="layout2"><div><h3>Strengths</h3><p class="muted">${p.strengths}</p><h3>Weaknesses</h3><p class="muted">${p.weaknesses}</p><h3>Contract</h3><p class="muted">${shortMoney(p.salary)} · ${p.years} year(s) · ${p.protected ? "protected/core asset" : "available/negotiable"}</p></div><div><h3>Scouting Department View</h3><p class="muted">Numerical ratings are intentionally hidden in normal play. This panel reveals directional grades only.</p>${["scoring", "shooting", "playmaking", "defense", "rebounding", "athleticism", "iq", "potential"].map((k) => gradeRow(k, p.ratings[k])).join("")}</div></div></div></div></div>`;
+    return `<div class="modalShade"><div class="modal"><div class="modalHeader"><div style="display:flex;gap:14px;align-items:center">${portraitHtml(p, "lg")}<h3>${escapeHtml(p.name)} <span class="pill">${escapeHtml(p.pos)}</span></h3></div><button class="close" data-close>Close</button></div><div class="modalBody"><p>${escapeHtml(p.scouting)}</p><div class="layout2"><div><h3>Strengths</h3><p class="muted">${escapeHtml(p.strengths)}</p><h3>Weaknesses</h3><p class="muted">${escapeHtml(p.weaknesses)}</p><h3>Contract</h3><p class="muted">${shortMoney(p.salary)} · ${p.years} year(s) · ${p.protected ? "protected/core asset" : "available/negotiable"}</p></div><div><h3>Scouting Department View</h3><p class="muted">Numerical ratings are intentionally hidden in normal play. This panel reveals directional grades only.</p>${["scoring", "shooting", "playmaking", "defense", "rebounding", "athleticism", "iq", "potential"].map((k) => gradeRow(k, p.ratings[k])).join("")}</div></div></div></div></div>`;
   }
   if (modal.type === "team") {
     const t = S.teams.find((x) => x.id === modal.id);
@@ -1874,7 +1989,7 @@ function applyCity(i) {
 function actions(a) {
   if (a === "start") {
     S.started = true;
-    S.team.abbr = abbr(S.team.city, S.team.nickname);
+    S.team.abbr = uniqueUserAbbr(S.team.city, S.team.nickname);
     S.season = null;
     addLog(
       "Franchise approved",
@@ -2000,12 +2115,15 @@ function submitTrade() {
   if (!ev.ok) return toast(ev.reason || "Trade rejected.");
   const give = S.roster.filter((p) => trade.userGive.includes(p.id));
   const get = other.players.filter((p) => trade.otherGive.includes(p.id));
+  // Preserve each player's protected status across the trade. Forcing it to false
+  // permanently stripped protected stars league-wide once they were ever moved,
+  // which silently corrupted trade value, team needs and the draft "Locked" logic.
   S.roster = S.roster
     .filter((p) => !trade.userGive.includes(p.id))
-    .concat(get.map((p) => ({ ...p, team: S.team.abbr, protected: false })));
+    .concat(get.map((p) => ({ ...p, team: S.team.abbr })));
   other.players = other.players
     .filter((p) => !trade.otherGive.includes(p.id))
-    .concat(give.map((p) => ({ ...p, team: other.id, protected: false })));
+    .concat(give.map((p) => ({ ...p, team: other.id })));
   if (trade.userPick) {
     S.picks.you--;
     S.picks.league++;
@@ -2520,13 +2638,13 @@ function offseasonDraftView() {
         ? os.rookieClass.find((p) => p.id === picked.playerId)
         : null;
       const isUser = id === S.team.abbr;
-      return `<div class="logItem" style="${i === os.currentPickIdx ? "border-color:var(--orange);background:#fff6ee" : ""}${isUser && !picked ? ";box-shadow:inset 4px 0 0 var(--orange)" : ""}"><b>Pick #${i + 1}</b> <span class="teamBadge" style="background:${meta.primary}">${id}</span> ${meta.name}${isUser ? ' <span class="pill good">YOU</span>' : ""}${player ? `<div class="mini">→ ${player.name} · ${player.pos} · ${player.team}</div>` : i === os.currentPickIdx ? '<div class="mini">on the clock</div>' : '<div class="mini">upcoming</div>'}</div>`;
+      return `<div class="logItem" style="${i === os.currentPickIdx ? "border-color:var(--orange);background:#fff6ee" : ""}${isUser && !picked ? ";box-shadow:inset 4px 0 0 var(--orange)" : ""}"><b>Pick #${i + 1}</b> <span class="teamBadge" style="background:${meta.primary}">${id}</span> ${escapeHtml(meta.name)}${isUser ? ' <span class="pill good">YOU</span>' : ""}${player ? `<div class="mini">→ ${escapeHtml(player.name)} · ${escapeHtml(player.pos)} · ${escapeHtml(player.team)}</div>` : i === os.currentPickIdx ? '<div class="mini">on the clock</div>' : '<div class="mini">upcoming</div>'}</div>`;
     })
     .join("");
   const board = available
     .map((p) => {
       const photo = portraitHtml(p);
-      return `<div class="playerCard">${photo}<div><div><span class="playerName">${p.name}</span> <span class="pill">${p.pos}</span> <span class="pill">${p.team}</span></div><div class="scout">${p.scouting}</div><div class="tags"><span class="tag">${visibleGrade(p)}</span><span class="tag">Upside ${p.ratings.potential}</span><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${p.strengths.split(",")[0]}</span></div></div><div class="actions"><button class="btn secondary" data-view="${p.id}">Scout</button><button class="btn ${userOnClock ? "" : "secondary"}" ${userOnClock ? "" : "disabled"} data-pick-rookie="${p.id}">${userOnClock ? "Draft" : "Wait"}</button></div></div>`;
+      return `<div class="playerCard">${photo}<div><div><span class="playerName">${escapeHtml(p.name)}</span> <span class="pill">${escapeHtml(p.pos)}</span> <span class="pill">${escapeHtml(p.team)}</span></div><div class="scout">${escapeHtml(p.scouting)}</div><div class="tags"><span class="tag">${visibleGrade(p)}</span><span class="tag">Upside ${p.ratings.potential}</span><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${escapeHtml(p.strengths.split(",")[0])}</span></div></div><div class="actions"><button class="btn secondary" data-view="${p.id}">Scout</button><button class="btn ${userOnClock ? "" : "secondary"}" ${userOnClock ? "" : "disabled"} data-pick-rookie="${p.id}">${userOnClock ? "Draft" : "Wait"}</button></div></div>`;
     })
     .join("");
   return `<section class="card"><div class="sectionTitle"><h3>Rookie Draft · Year ${S.year + 1} Class</h3><span>${os.picks.length}/${os.draftOrder.length} picks made</span></div><div class="layout2"><div><div class="sectionTitle"><h3>On the Clock</h3><span><span class="teamBadge" style="background:${onClockMeta.primary}">${onClock}</span>${onClockMeta.name}${userOnClock ? " · YOUR PICK" : ""}</span></div><div class="board" style="max-height:720px">${board || '<div class="empty">Draft complete.</div>'}</div></div><div><div class="sectionTitle"><h3>Draft Order</h3><span>worst → best</span></div><div class="cardPad log" style="max-height:720px;overflow:auto">${orderHtml}</div></div></div></section>`;
@@ -2544,7 +2662,7 @@ function offseasonDoneView() {
   return `<section class="card"><div class="sectionTitle"><h3>Year ${S.year} Offseason Complete</h3><span>${os.picks.length} rookies drafted league-wide</span></div><div class="cardPad"><div class="logItem"><b>Your selection</b><p class="muted">${userRookie ? `You took ${userRookie.name} (${userRookie.pos}, ${userRookie.team}) at pick #${userPick.pickNo}. Welcome to the franchise.` : "You did not have a pick in this draft (you finished in the top 2 last season)."}</p></div><h3>Top 5 picks recap</h3><div class="log">${top5
     .map((pk) => {
       const r = os.rookieClass.find((x) => x.id === pk.playerId);
-      return `<div class="logItem"><b>#${pk.pickNo} · ${pk.team}</b><div class="mini">${r.name} · ${r.pos} · ${r.team} · ${visibleGrade(r)}</div></div>`;
+      return `<div class="logItem"><b>#${pk.pickNo} · ${escapeHtml(pk.team)}</b><div class="mini">${escapeHtml(r.name)} · ${escapeHtml(r.pos)} · ${escapeHtml(r.team)} · ${visibleGrade(r)}</div></div>`;
     })
     .join(
       "",
@@ -2871,7 +2989,7 @@ function awardsView() {
     const team = x.teamId;
     const s = x.p.seasonStats;
     const gp = Math.max(1, s.gp);
-    return `<div class="logItem" style="display:flex;gap:14px;align-items:center">${portraitHtml(x.p)}<div style="flex:1"><div class="mini" style="text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:800">${label}</div><div style="font-size:18px;font-weight:900">${x.p.name}</div><div class="mini">${team} · ${(s.pts / gp).toFixed(1)} pts · ${(s.reb / gp).toFixed(1)} reb · ${(s.ast / gp).toFixed(1)} ast${extra ? " · " + extra : ""}</div></div></div>`;
+    return `<div class="logItem" style="display:flex;gap:14px;align-items:center">${portraitHtml(x.p)}<div style="flex:1"><div class="mini" style="text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:800">${label}</div><div style="font-size:18px;font-weight:900">${escapeHtml(x.p.name)}</div><div class="mini">${escapeHtml(team)} · ${(s.pts / gp).toFixed(1)} pts · ${(s.reb / gp).toFixed(1)} reb · ${(s.ast / gp).toFixed(1)} ast${extra ? " · " + extra : ""}</div></div></div>`;
   };
   const mipExtra = a.mip
     ? `+${composite(a.mip.p) - a.mip.p.compositeAtStart} composite`
@@ -2880,7 +2998,7 @@ function awardsView() {
     .map((x, i) => {
       const s = x.p.seasonStats;
       const gp = Math.max(1, s.gp);
-      return `<div class="checkRow">${portraitHtml(x.p, "sm")}<div><b>${i + 1}. ${x.p.name}</b> <span class="pill">${x.p.pos}</span><div class="mini">${x.teamId} · ${(s.pts / gp).toFixed(1)} / ${(s.reb / gp).toFixed(1)} / ${(s.ast / gp).toFixed(1)}</div></div></div>`;
+      return `<div class="checkRow">${portraitHtml(x.p, "sm")}<div><b>${i + 1}. ${escapeHtml(x.p.name)}</b> <span class="pill">${escapeHtml(x.p.pos)}</span><div class="mini">${escapeHtml(x.teamId)} · ${(s.pts / gp).toFixed(1)} / ${(s.reb / gp).toFixed(1)} / ${(s.ast / gp).toFixed(1)}</div></div></div>`;
     })
     .join("");
   return `<section class="card"><div class="sectionTitle"><h3>${a.year} Season Awards</h3>${a.champion ? `<span class="pill good">${teamMeta(a.champion).id} Champions</span>` : ""}</div><div class="cardPad"><div class="layout2"><div>${row("Most Valuable Player", a.mvp)}${row("Defensive Player of the Year", a.dpoy, "def " + (a.dpoy ? a.dpoy.p.ratings.defense : ""))}</div><div>${row("Rookie of the Year", a.roy)}${row("Most Improved", a.mip, mipExtra)}</div></div><h3 style="margin-top:18px">All-League Team</h3><div class="log">${allLeagueHtml}</div><div class="actions" style="margin-top:18px"><button class="btn" data-action="acceptAwards">Continue to Offseason →</button></div></div></section>`;
@@ -3019,11 +3137,7 @@ function applyWeeklyTransition() {
 function rollInjuries(g) {
   const checkTeam = (id) => {
     const team = teamMeta(id);
-    const top = team.players
-      .slice()
-      .filter((p) => !p.injury)
-      .sort((a, b) => composite(b) - composite(a))
-      .slice(0, 8);
+    const top = healthyRotation(team.players, 8);
     top.forEach((p) => {
       if (Math.random() < 0.022) {
         const r = Math.random();
@@ -3284,7 +3398,7 @@ function devFocusSection() {
     roster
       .map(
         (p) =>
-          `<option value="${p.id}" ${cur.playerId === p.id ? "selected" : ""}>${p.name} · ${p.pos} · pot ${p.ratings.potential}</option>`,
+          `<option value="${p.id}" ${cur.playerId === p.id ? "selected" : ""}>${escapeHtml(p.name)} · ${escapeHtml(p.pos)} · pot ${p.ratings.potential}</option>`,
       )
       .join("");
   const ratingOpts = RATING_KEYS.filter((k) => k !== "potential")
@@ -3315,7 +3429,7 @@ function injurySection() {
     })
     .map(
       (p) =>
-        `<tr><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div><div class="playerName">${p.name}</div><div class="mini">${p.pos} · ${visibleGrade(p)}</div></div></div></td><td>${injuryBadge(p)}</td><td>${p.mood || 60}</td></tr>`,
+        `<tr><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div><div class="playerName">${escapeHtml(p.name)}</div><div class="mini">${escapeHtml(p.pos)} · ${visibleGrade(p)}</div></div></div></td><td>${injuryBadge(p)}</td><td>${p.mood || 60}</td></tr>`,
     )
     .join("");
   return `<section class="card"><div class="sectionTitle"><h3>Injury Report</h3><span>${healthy} healthy · ${injured.length} out</span></div><table class="table"><thead><tr><th>Player</th><th>Status</th><th>Mood</th></tr></thead><tbody>${rows}</tbody></table></section>`;
@@ -3446,4 +3560,46 @@ function removeCustomRookie(key) {
   save();
   render();
 }
-render();
+// Skip the initial paint under the test harness (no real DOM).
+if (typeof window === "undefined" || !window.__WNBA_TEST__) render();
+
+// Node-only export surface for unit tests. `module` is undefined in the browser,
+// so this block is inert there and has zero effect on the shipped app.
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    escapeHtml,
+    composite,
+    tradeValue,
+    visibleGrade,
+    teamLetter,
+    abbr,
+    uniqueUserAbbr,
+    ordinal,
+    migrate,
+    freshState,
+    isValidSave,
+    generateSchedule,
+    teamPower,
+    simScore,
+    evaluateTrade,
+    distributeAndRecord,
+    healthyRotation,
+    leagueIds,
+    clearComputeCaches,
+    get S() {
+      return S;
+    },
+    set S(v) {
+      S = v;
+    },
+    get trade() {
+      return trade;
+    },
+    set trade(v) {
+      trade = v;
+    },
+    get draftFilters() {
+      return draftFilters;
+    },
+  };
+}
