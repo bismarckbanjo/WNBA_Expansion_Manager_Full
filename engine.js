@@ -154,4 +154,110 @@ window.GAME_ENGINE = Object.freeze({
       roll < (Number.isFinite(blowupChance) ? blowupChance : 0.14)
     );
   },
+
+  pairKey,
+
+  pairingStatus(starts, pairAt, pactAt) {
+    const shared = Number(starts) || 0;
+    const pair = Number.isFinite(pairAt) ? pairAt : 6;
+    const pact = Number.isFinite(pactAt) ? pactAt : 12;
+    if (shared >= pact) return "pact";
+    if (shared >= pair) return "paired";
+    return "forming";
+  },
+
+  sitBondDelta(player) {
+    if (player && player.hiddenTrait === "loyal") return -1;
+    if (player && player.persona === "competitor") return -5;
+    return -3;
+  },
+
+  startBondDelta() {
+    return 2;
+  },
+
+  captainApproval(nominee, roster, rules) {
+    if (!nominee || !Array.isArray(roster) || !roster.length) return 0;
+    const conflicts = (rules && rules.conflicts) || [];
+    const conflictSet = new Set(conflicts.map((pair) => pairKey(pair[0], pair[1])));
+    const nomKeys = playerTraitKeys(nominee);
+    let yes = 0;
+    roster.forEach((player) => {
+      if (player.id === nominee.id) {
+        yes += 1;
+        return;
+      }
+      const keys = playerTraitKeys(player);
+      const clashes = keys.some((aTrait) =>
+        nomKeys.some((bTrait) => conflictSet.has(pairKey(aTrait, bTrait))),
+      );
+      if (clashes) return;
+      if ((player.bond || 50) >= 40) yes += 1;
+      else if (player.persona === "locker-glue" || player.hiddenTrait === "loyal") yes += 1;
+      else if (player.persona === nominee.persona) yes += 1;
+    });
+    return yes / roster.length;
+  },
+
+  cultureFlags(top8, tension, starId) {
+    const rotation = Array.isArray(top8) ? top8.filter(Boolean) : [];
+    const competitors = rotation.filter((player) => player.persona === "competitor").length;
+    const hasMentor = rotation.some((player) => player.persona === "mentor");
+    const hasSponge = rotation.some(
+      (player) => player.persona === "sponge" || player.persona === "gym-rat",
+    );
+    return {
+      grit: competitors >= 3,
+      lab: hasMentor && hasSponge,
+      star: !!starId && rotation.some((player) => player.id === starId),
+      calm: (tension || 0) < 25,
+    };
+  },
+
+  pairingTensionRelief(top8Ids, pairings, knobs) {
+    const ids = new Set(Array.isArray(top8Ids) ? top8Ids : []);
+    const room = pairings && typeof pairings === "object" ? pairings : {};
+    const pairAt = knobs && Number.isFinite(knobs.pairStarts) ? knobs.pairStarts : 6;
+    const pactAt = knobs && Number.isFinite(knobs.pactStarts) ? knobs.pactStarts : 12;
+    const pairRelief = knobs && Number.isFinite(knobs.pairingTension) ? knobs.pairingTension : 5;
+    const pactRelief = knobs && Number.isFinite(knobs.pactTension) ? knobs.pactTension : 10;
+    let relief = 0;
+    Object.keys(room).forEach((key) => {
+      const [a, b] = key.split("|");
+      if (!ids.has(a) || !ids.has(b)) return;
+      const status = window.GAME_ENGINE.pairingStatus(
+        room[key] && room[key].starts,
+        pairAt,
+        pactAt,
+      );
+      if (status === "pact") relief += pactRelief;
+      else if (status === "paired") relief += pairRelief;
+    });
+    return relief;
+  },
+
+  harvestOutcome(player, ctx) {
+    const context = ctx || {};
+    const bond = player && Number.isFinite(player.bond) ? player.bond : 50;
+    const heat = context.seasonHeat || 0;
+    const dramaHeat = Number.isFinite(context.dramaWalkHeat) ? context.dramaWalkHeat : 28;
+    const hometown = Number.isFinite(context.hometownBond) ? context.hometownBond : 60;
+    const spongeBond = Number.isFinite(context.spongeBond) ? context.spongeBond : 50;
+    if (player && player.hiddenTrait === "drama-prone" && heat >= dramaHeat) {
+      return { walk: true, salaryMult: 1, tag: "drama" };
+    }
+    if (player && player.persona === "competitor" && bond < 35) {
+      return { walk: true, salaryMult: 1, tag: "minutes" };
+    }
+    if (player && player.persona === "mentor" && bond >= hometown) {
+      return { walk: false, salaryMult: 0.85, tag: "hometown" };
+    }
+    if (player && player.persona === "sponge" && bond >= spongeBond) {
+      return { walk: false, salaryMult: 1, tag: "loyal-kid" };
+    }
+    if (context.hasInstigator && player && player.hiddenTrait !== "instigator") {
+      return { walk: false, salaryMult: 1.15, tag: "poisoned" };
+    }
+    return { walk: false, salaryMult: 1, tag: null };
+  },
 });

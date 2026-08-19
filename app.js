@@ -6,7 +6,7 @@ const LS_KEY = "wnbaExpansionFullBuild.v2";
 const ACTIVE_SLOT_KEY = "wnbaExpansion.activeSlot.v1";
 const SAVE_INDEX_KEY = "wnbaExpansion.saveIndex.v1";
 const SLOT_PREFIX = "wnbaExpansion.slot.v1.";
-const SAVE_VERSION = 6;
+const SAVE_VERSION = 7;
 const money = (n) => "$" + Math.round(n).toLocaleString();
 const shortMoney = (n) =>
   n >= 1000000
@@ -139,6 +139,13 @@ function freshState() {
       influence: 1,
       lastInfluenceWeek: 0,
       events: [],
+      pairings: {},
+      captainId: null,
+      culture: null,
+      cultureTrack: { grit: 0, lab: 0, star: 0 },
+      campaignId: null,
+      lastCoreIds: [],
+      seasonHeatPeak: 0,
     },
     log: [],
     objectives: [
@@ -229,6 +236,19 @@ function migrate(s) {
   if (!Number.isFinite(s.lockerRoom.influence)) s.lockerRoom.influence = 1;
   if (!Number.isFinite(s.lockerRoom.lastInfluenceWeek)) s.lockerRoom.lastInfluenceWeek = 0;
   if (!Array.isArray(s.lockerRoom.events)) s.lockerRoom.events = [];
+  if (!s.lockerRoom.pairings || typeof s.lockerRoom.pairings !== "object")
+    s.lockerRoom.pairings = {};
+  if (s.lockerRoom.captainId === undefined) s.lockerRoom.captainId = null;
+  if (s.lockerRoom.culture === undefined) s.lockerRoom.culture = null;
+  if (!s.lockerRoom.cultureTrack || typeof s.lockerRoom.cultureTrack !== "object") {
+    s.lockerRoom.cultureTrack = { grit: 0, lab: 0, star: 0 };
+  }
+  ["grit", "lab", "star"].forEach((key) => {
+    if (!Number.isFinite(s.lockerRoom.cultureTrack[key])) s.lockerRoom.cultureTrack[key] = 0;
+  });
+  if (s.lockerRoom.campaignId === undefined) s.lockerRoom.campaignId = null;
+  if (!Array.isArray(s.lockerRoom.lastCoreIds)) s.lockerRoom.lastCoreIds = [];
+  if (!Number.isFinite(s.lockerRoom.seasonHeatPeak)) s.lockerRoom.seasonHeatPeak = 0;
   // Stats foundations for every player
   const ensureStats = (p) => {
     if (!p.seasonStats) p.seasonStats = { gp: 0, pts: 0, reb: 0, ast: 0, w: 0 };
@@ -535,6 +555,14 @@ function normalizeSave(input) {
     ...base.lockerRoom,
     ...(isRecord(s.lockerRoom) ? s.lockerRoom : {}),
     events: Array.isArray(s.lockerRoom && s.lockerRoom.events) ? s.lockerRoom.events : [],
+    pairings: isRecord(s.lockerRoom && s.lockerRoom.pairings) ? s.lockerRoom.pairings : {},
+    cultureTrack: {
+      ...base.lockerRoom.cultureTrack,
+      ...(isRecord(s.lockerRoom && s.lockerRoom.cultureTrack) ? s.lockerRoom.cultureTrack : {}),
+    },
+    lastCoreIds: Array.isArray(s.lockerRoom && s.lockerRoom.lastCoreIds)
+      ? s.lockerRoom.lastCoreIds
+      : [],
   };
   s.customRookies = isRecord(s.customRookies) ? s.customRookies : {};
   s.awards = Array.isArray(s.awards) ? s.awards : [];
@@ -829,6 +857,8 @@ function chemistryFitChips(player) {
     const other = syns[0].aId === player.id ? syns[0].b : syns[0].a;
     bits.push(`<span class="pill good">Synergy with ${escapeHtml(other)}</span>`);
   }
+  const pairingBits = pairingChipsFor(player);
+  if (pairingBits) bits.push(pairingBits);
   if (clashes[0]) {
     const other = clashes[0].aId === player.id ? clashes[0].b : clashes[0].a;
     bits.push(`<span class="pill warn">Clashes with ${escapeHtml(other)}</span>`);
@@ -842,7 +872,15 @@ function teamTensionScore(teamId) {
   const players = healthyRotation(teamMeta(teamId).players, 8, teamId);
   const report = ENGINE.tensionReport(players, DATA.personality || {});
   const heat = teamId === S.team.abbr && S.lockerRoom ? S.lockerRoom.heat || 0 : 0;
-  return Math.max(0, Math.min(100, report.tension + heat));
+  const relief =
+    teamId === S.team.abbr
+      ? ENGINE.pairingTensionRelief(
+          players.map((player) => player.id),
+          S.lockerRoom && S.lockerRoom.pairings,
+          lockerKnobs(),
+        )
+      : 0;
+  return Math.max(0, Math.min(100, report.tension + heat - relief));
 }
 function teamChemistryMult(teamId) {
   const knobs = lockerKnobs();
@@ -851,12 +889,45 @@ function teamChemistryMult(teamId) {
     teamId === S.team.abbr && S.lockerRoom && S.week < (S.lockerRoom.suppressedUntilWeek || 0);
   const traits = (S.coaches && S.coaches.assistant && S.coaches.assistant.traits) || [];
   const disciplinarian = teamId === S.team.abbr && traits.includes("disciplinarian");
+  let scale = knobs.chemistryScale;
+  if (teamId === S.team.abbr && S.lockerRoom && S.lockerRoom.culture === "star") {
+    const star = rosterStar();
+    const top = healthyRotation(S.roster, 8, S.team.abbr);
+    if (star && top.some((player) => player.id === star.id)) scale *= 0.7;
+  }
   return ENGINE.chemistryMultiplier(tension, {
     suppressed,
     disciplinarian,
-    scale: knobs.chemistryScale,
+    scale,
     disciplinarianFactor: knobs.disciplinarianFactor,
   });
+}
+function rosterStar() {
+  if (!S.roster.length) return null;
+  return S.roster.slice().sort((a, b) => composite(b) - composite(a))[0];
+}
+function pairingChipsFor(player) {
+  if (!player || !S.lockerRoom || !S.lockerRoom.pairings) return "";
+  const knobs = lockerKnobs();
+  const hit = Object.keys(S.lockerRoom.pairings)
+    .map((key) => {
+      const [a, b] = key.split("|");
+      if (a !== player.id && b !== player.id) return null;
+      const otherId = a === player.id ? b : a;
+      const other = S.roster.find((item) => item.id === otherId);
+      if (!other) return null;
+      const status = ENGINE.pairingStatus(
+        S.lockerRoom.pairings[key].starts,
+        knobs.pairStarts,
+        knobs.pactStarts,
+      );
+      if (status === "forming") return null;
+      return { other, status };
+    })
+    .find(Boolean);
+  if (!hit) return "";
+  const label = hit.status === "pact" ? "Pact with" : "Pairing with";
+  return `<span class="pill good">${label} ${escapeHtml(hit.other.name)}</span>`;
 }
 function userLockerReport() {
   const players = healthyRotation(S.roster, 8, S.team.abbr);
@@ -1477,6 +1548,13 @@ function evaluateTrade(other) {
   }
   const partnerNeed = teamNeed(other);
   if (uPlayers.some((p) => p.pos.includes(partnerNeed))) userValue += 120;
+  const blessed = uPlayers.filter((p) => p.tradeBlessed);
+  if (blessed.length) {
+    userValue += blessed.length * (lockerKnobs().blessedTradeValue || 160);
+    advice.push(
+      `${blessed.map((p) => p.name).join(", ")} asked out — the partner will take her cheaper.`,
+    );
+  }
   const ratio = userValue / (otherValue || 1);
   if (hasUserAssets && hasOtherAssets && ratio < BALANCE.trade.minimumRatio) {
     ok = false;
@@ -2116,6 +2194,7 @@ function simScore(home, away, game) {
   let tight = 0;
   if (userIs && hcTraits.includes("clutch")) tight += 3;
   if (userIs && game && game.playoff && hcTraits.includes("championship-pedigree")) tight += 2;
+  if (userIs && game && game.playoff && S.lockerRoom && S.lockerRoom.captainId) tight += 2;
   const moodScale = BALANCE.moodScoreScale || 0.04;
   const hMood = (rotationMood(home) - 60) * moodScale;
   const aMood = (rotationMood(away) - 60) * moodScale;
@@ -2179,9 +2258,13 @@ function distributeAndRecord(id, ptsFor, won, accumulate = true) {
   const slotW = BALANCE.statShareWeights;
   const knobs = lockerKnobs();
   const tension = teamTensionScore(id);
+  const freezeTension =
+    id === S.team.abbr && S.lockerRoom && S.lockerRoom.culture === "grit"
+      ? knobs.gritFreezeTension || 55
+      : knobs.freezeTension;
   const weights = healthy.map((p, i) => {
     const sc = (p.ratings && p.ratings.scoring) || 60;
-    const freeze = ENGINE.statShareFactor(p, tension, knobs);
+    const freeze = ENGINE.statShareFactor(p, tension, { ...knobs, freezeTension });
     return (slotW[i] ?? 0.14) * (0.6 + sc / 100) * (0.85 + random() * 0.3) * freeze;
   });
   const pts = ENGINE.allocateIntegerTotal(weights, total);
@@ -2296,6 +2379,7 @@ function simulateGame(g) {
   if (g.home === S.team.abbr || g.away === S.team.abbr) {
     // Each user game advances the calendar: dev growth, market churn, injury healing, press.
     applyWeeklyTransition(g.week);
+    tickMinutesAndCulture();
     tickLockerRoom(g.week);
     marketChurn();
     maybeTriggerPress(g);
@@ -2892,6 +2976,7 @@ function bindDelegatedEvents() {
     else if (target.dataset.rotateDown) moveRotation(target.dataset.rotateDown, 1);
     else if (target.dataset.sit) sitPlayer(target.dataset.sit);
     else if (target.dataset.start) startPlayer(target.dataset.start);
+    else if (target.dataset.culture) claimCulture(target.dataset.culture);
   });
   appRoot.addEventListener("input", (event) => {
     const control = event.target;
@@ -3046,7 +3131,13 @@ function actions(a) {
   if (a === "enterOffseason") enterOffseason();
   if (a === "advanceToDraft") advanceToDraft();
   if (a === "startNextSeason") startNextSeason();
-  if (a === "mediateLockerRoom") mediateLockerRoom();
+  if (a === "nominateCaptain") {
+    const id = (document.getElementById("lr-captain") || {}).value;
+    nominateCaptain(id);
+  }
+  if (a === "closedDoor") spendInfluence("closed-door", influenceTargetId());
+  if (a === "campaignPlayer") spendInfluence("campaign", influenceTargetId());
+  if (a === "blessExit") spendInfluence("bless", influenceTargetId());
   if (a === "addCustomRookie") addCustomRookie();
   if (a === "commitDevFocus") {
     const pid = (document.getElementById("dev-player") || {}).value || null;
@@ -3126,6 +3217,10 @@ function executeTrade(packageSpec) {
   const ev = evaluateTrade(spec.other);
   if (!ev.ok) return toast(ev.reason || "Trade rejected.");
   recordUndo("trade");
+  breakPairingsForPlayers(
+    spec.give.map((p) => p.id),
+    spec.give.some((p) => p.tradeBlessed),
+  );
   applyTradePackage(spec);
   addLog(
     "Trade completed",
@@ -3152,10 +3247,29 @@ function currentTradePackage() {
 function applyTradePackage(spec) {
   S.roster = S.roster
     .filter((p) => !spec.give.some((player) => player.id === p.id))
-    .concat(spec.get.map((p) => ({ ...p, team: S.team.abbr, lastTeam: spec.other.id })));
+    .concat(
+      spec.get.map((p) => ({
+        ...p,
+        team: S.team.abbr,
+        lastTeam: spec.other.id,
+        bond: 50,
+        startsThisSeason: 0,
+        sitStreak: 0,
+        wantsOut: false,
+        tradeBlessed: false,
+      })),
+    );
   spec.other.players = spec.other.players
     .filter((p) => !spec.get.some((player) => player.id === p.id))
-    .concat(spec.give.map((p) => ({ ...p, team: spec.other.id, lastTeam: S.team.abbr })));
+    .concat(
+      spec.give.map((p) => ({
+        ...p,
+        team: spec.other.id,
+        lastTeam: S.team.abbr,
+        wantsOut: false,
+        tradeBlessed: false,
+      })),
+    );
   spec.userPickAssets.forEach((pick) => {
     pick.owner = spec.other.id;
   });
@@ -3307,14 +3421,12 @@ function ageOnePlayer(p, teammates) {
       }
     }
   }
-  const lockerBonus = ENGINE.mentorDevBonus(
-    [p].concat(teammates || []),
-    S.year,
-    DATA.personality || {},
-  )[p.id];
+  const lockerBonus =
+    (ENGINE.mentorDevBonus([p].concat(teammates || []), S.year, DATA.personality || {})[p.id] ||
+      0) * (S.lockerRoom && S.lockerRoom.culture === "lab" ? 2 : 1);
   if (lockerBonus) {
     const k = pickOne(AGING_RATINGS);
-    const next = clampRating(p.ratings[k] + 1);
+    const next = clampRating(p.ratings[k] + (lockerBonus >= 0.8 ? 2 : 1));
     if (next !== p.ratings[k]) {
       deltas[k] = (deltas[k] || 0) + (next - p.ratings[k]);
       p.ratings[k] = next;
@@ -3412,11 +3524,19 @@ function resignUserPlayer(id) {
   if (userSalary() > DATA.cap) return toast("Not enough cap room to re-sign.");
   recordUndo("re-sign");
   player.years = 2;
+  const mult = Number.isFinite(player.harvestSalaryMult) ? player.harvestSalaryMult : 1;
+  if (mult !== 1) player.salary = Math.round(player.salary * mult);
   player.team = S.team.abbr;
   player.lastTeam = S.team.abbr;
   if (!S.roster.some((item) => item.id === id)) S.roster.push(player);
   S.offseason.pendingResign = S.offseason.pendingResign.filter((item) => item.id !== id);
-  addLog("Re-signed", `${player.name} agreed to a ${player.years}-year deal.`);
+  const dealNote =
+    player.harvestTag === "hometown"
+      ? " at a hometown rate"
+      : player.harvestTag === "poisoned"
+        ? " after the room made it expensive"
+        : "";
+  addLog("Re-signed", `${player.name} agreed to a ${player.years}-year deal${dealNote}.`);
   render();
 }
 function walkUserPlayer(id) {
@@ -3714,6 +3834,7 @@ function enterOffseason() {
     expirations,
     pendingResign: expirations.user.slice(),
   };
+  applyOffseasonHarvest();
   tab = "schedule";
   addLog(
     "Offseason opened",
@@ -3860,6 +3981,7 @@ function startNextSeason() {
   S.postGame = null;
   S.playoffs = null;
   clearAllInjuries();
+  resetSeasonIntimacy();
   ensureSeason(true);
   S.offseason = null;
   tab = "schedule";
@@ -3915,7 +4037,18 @@ function offseasonContractsView() {
   const cards = pending
     .map((player) => {
       const overCap = userSalary() > DATA.cap;
-      return `<div class="playerCard">${portraitHtml(player)}<div><span class="playerName">${escapeHtml(player.name)}</span> <span class="pill">${escapeHtml(player.pos)}</span><div class="scout">${escapeHtml(player.scouting || "")}</div><div class="tags"><span class="tag">${shortMoney(player.salary)}</span><span class="tag">Age ${player.age || "—"}</span><span class="tag">${visibleGrade(player)}</span></div></div><div class="actions"><button class="btn" data-resign="${escapeAttr(player.id)}" ${overCap ? "disabled" : ""}>Re-sign 2 years</button><button class="btn secondary" data-walk="${escapeAttr(player.id)}">Let walk</button></div></div>`;
+      const harvestNote =
+        player.harvestTag === "hometown"
+          ? `<span class="pill good">Hometown discount</span>`
+          : player.harvestTag === "loyal-kid"
+            ? `<span class="pill good">Wants to stay</span>`
+            : player.harvestTag === "poisoned"
+              ? `<span class="pill warn">Wants more after the room</span>`
+              : "";
+      const ask = Number.isFinite(player.harvestSalaryMult)
+        ? Math.round(player.salary * player.harvestSalaryMult)
+        : player.salary;
+      return `<div class="playerCard">${portraitHtml(player)}<div><span class="playerName">${escapeHtml(player.name)}</span> <span class="pill">${escapeHtml(player.pos)}</span> ${harvestNote}<div class="scout">${escapeHtml(player.scouting || "")}</div><div class="tags"><span class="tag">${shortMoney(ask)}</span><span class="tag">Age ${player.age || "—"}</span><span class="tag">${visibleGrade(player)}</span><span class="tag">Bond ${Math.round(player.bond || 50)}</span></div></div><div class="actions"><button class="btn" data-resign="${escapeAttr(player.id)}" ${overCap ? "disabled" : ""}>Re-sign 2 years</button><button class="btn secondary" data-walk="${escapeAttr(player.id)}">Let walk</button></div></div>`;
     })
     .join("");
   return `<section class="card"><div class="sectionTitle"><h3>Re-sign or walk</h3><span>${pending.length} expired</span></div><div class="cardPad"><p class="muted">League free agents are in the same pool as waivers. NPC clubs already re-signed or replaced down to 11–12. Walks join that pool.</p><div class="board">${cards}</div><div class="actions" style="margin-top:18px"><button class="btn" data-action="advanceToDraft" ${pending.length ? "disabled" : ""}>Continue to Rookie Draft</button><button class="btn secondary" data-tab="waivers">Open Free Agency</button></div></div></section>`;
@@ -4250,7 +4383,12 @@ function computeAwards() {
   const score = (x) => {
     const s = x.p.seasonStats;
     const gp = Math.max(1, s.gp);
-    return (s.pts / gp) * 1.0 + (s.reb / gp) * 0.55 + (s.ast / gp) * 0.7 + (s.w / gp) * 8;
+    const base = (s.pts / gp) * 1.0 + (s.reb / gp) * 0.55 + (s.ast / gp) * 0.7 + (s.w / gp) * 8;
+    const boost =
+      S.lockerRoom && S.lockerRoom.campaignId === x.p.id
+        ? 1 + (lockerKnobs().campaignBoost || 0.15)
+        : 1;
+    return base * boost;
   };
   const ordered = withStats.slice().sort((a, b) => score(b) - score(a));
   const mvp = ordered[0];
@@ -4488,7 +4626,8 @@ function applyWeeklyTransition(week = S.week) {
           ? 0.2
           : 0;
       const lockerBonus =
-        ENGINE.mentorDevBonus(S.roster, S.year, DATA.personality || {})[target.id] || 0;
+        (ENGINE.mentorDevBonus(S.roster, S.year, DATA.personality || {})[target.id] || 0) *
+        (S.lockerRoom && S.lockerRoom.culture === "lab" ? 2 : 1);
       S.coaches.devAccumulator =
         (S.coaches.devAccumulator || 0) + mult + mentorBonus + youngDev + lockerBonus;
       let pts = 0;
@@ -4518,13 +4657,313 @@ function pushLockerEvent(text) {
   S.lockerRoom.events.unshift({ week: S.week, year: S.year, text });
   if (S.lockerRoom.events.length > 8) S.lockerRoom.events.length = 8;
 }
+function clampMood(n) {
+  return Math.max(20, Math.min(99, n));
+}
+function clampBond(n) {
+  return Math.max(0, Math.min(100, n));
+}
+function influenceTargetId() {
+  return (document.getElementById("lr-player") || {}).value || null;
+}
+function tickMinutesAndCulture() {
+  if (!S.lockerRoom) return;
+  const knobs = lockerKnobs();
+  ensureUserRotation();
+  const top = healthyRotation(S.roster, 8, S.team.abbr);
+  const topIds = top.map((player) => player.id);
+  const topSet = new Set(topIds);
+  const star = rosterStar();
+  applyCoreShift(topIds);
+  S.roster.forEach((player) => {
+    if (player.injury) return;
+    if (topSet.has(player.id)) {
+      player.startsThisSeason = (player.startsThisSeason || 0) + 1;
+      player.sitStreak = 0;
+      player.bond = clampBond((player.bond || 50) + ENGINE.startBondDelta());
+    } else {
+      player.sitStreak = (player.sitStreak || 0) + 1;
+      player.bond = clampBond((player.bond || 50) + ENGINE.sitBondDelta(player));
+      const fileAt = player.hiddenTrait === "loyal" ? 99 : knobs.sitFile || 3;
+      if (player.persona === "competitor" && player.sitStreak >= fileAt && !player.wantsOut) {
+        player.wantsOut = true;
+        player.mood = clampMood((player.mood || 60) - 8);
+        S.lockerRoom.heat = Math.min(40, (S.lockerRoom.heat || 0) + 6);
+        addLog("Minutes complaint", `${player.name} wants a bigger role — or out.`);
+        pushLockerEvent(`${player.name} filed over minutes.`);
+      }
+    }
+  });
+  if (S.lockerRoom.captainId && !topSet.has(S.lockerRoom.captainId)) {
+    S.lockerRoom.heat = Math.min(40, (S.lockerRoom.heat || 0) + 8);
+    const captain = S.roster.find((player) => player.id === S.lockerRoom.captainId);
+    if (captain) {
+      captain.mood = clampMood((captain.mood || 60) - 6);
+      pushLockerEvent(`Captain ${captain.name} sat. The room noticed.`);
+    }
+  }
+  if (S.lockerRoom.culture === "star" && star && !topSet.has(star.id)) {
+    S.lockerRoom.heat = Math.min(40, (S.lockerRoom.heat || 0) + 15);
+    star.mood = clampMood((star.mood || 60) - 12);
+    pushLockerEvent(`${star.name} is the franchise. Sitting her cratered the room.`);
+  }
+  if (S.lockerRoom.culture === "lab") {
+    S.roster.forEach((player) => {
+      if ((player.age || 0) >= 30) player.mood = clampMood((player.mood || 60) - 1);
+    });
+  }
+  if (!S.lockerRoom.pairings || typeof S.lockerRoom.pairings !== "object")
+    S.lockerRoom.pairings = {};
+  for (let i = 0; i < top.length; i++) {
+    for (let j = i + 1; j < top.length; j++) {
+      const key = ENGINE.pairKey(top[i].id, top[j].id);
+      const entry = S.lockerRoom.pairings[key] || { starts: 0 };
+      const before = ENGINE.pairingStatus(entry.starts, knobs.pairStarts, knobs.pactStarts);
+      entry.starts = (entry.starts || 0) + 1;
+      S.lockerRoom.pairings[key] = entry;
+      const after = ENGINE.pairingStatus(entry.starts, knobs.pairStarts, knobs.pactStarts);
+      if (before !== after && after === "paired") {
+        pushLockerEvent(`${top[i].name} + ${top[j].name} are a pairing.`);
+      }
+      if (before !== after && after === "pact") {
+        pushLockerEvent(`${top[i].name} + ${top[j].name} locked in a run-it-back pact.`);
+      }
+    }
+  }
+  Object.keys(S.lockerRoom.pairings).forEach((key) => {
+    const [a, b] = key.split("|");
+    const aIn = topSet.has(a);
+    const bIn = topSet.has(b);
+    if (aIn === bIn) return;
+    const entry = S.lockerRoom.pairings[key];
+    const status = ENGINE.pairingStatus(entry.starts, knobs.pairStarts, knobs.pactStarts);
+    if (status === "pact") {
+      entry.starts = knobs.pairStarts || 6;
+      const stayed = S.roster.find((player) => player.id === (aIn ? a : b));
+      const sat = S.roster.find((player) => player.id === (aIn ? b : a));
+      if (stayed) stayed.mood = clampMood((stayed.mood || 60) - 12);
+      if (sat) sat.mood = clampMood((sat.mood || 60) - 12);
+      if (stayed && sat)
+        pushLockerEvent(`Pact broken on the floor: ${sat.name} sat, ${stayed.name} felt it.`);
+    } else if (status === "paired") {
+      entry.starts = Math.max(0, (entry.starts || 0) - 2);
+    }
+  });
+  const tension = teamTensionScore(S.team.abbr);
+  const flags = ENGINE.cultureFlags(top, tension, star && star.id);
+  const track = S.lockerRoom.cultureTrack || { grit: 0, lab: 0, star: 0 };
+  if (flags.grit) track.grit += 1;
+  if (flags.lab) track.lab += 1;
+  if (flags.star) track.star += 1;
+  S.lockerRoom.cultureTrack = track;
+  S.lockerRoom.seasonHeatPeak = Math.max(
+    S.lockerRoom.seasonHeatPeak || 0,
+    S.lockerRoom.heat || 0,
+    tension,
+  );
+}
+function applyCoreShift(nextIds) {
+  const prev = S.lockerRoom.lastCoreIds || [];
+  if (!prev.length) {
+    S.lockerRoom.lastCoreIds = nextIds.slice();
+    return;
+  }
+  const prevSet = new Set(prev);
+  const newcomers = nextIds.filter((id) => !prevSet.has(id));
+  if (newcomers.length) {
+    S.lockerRoom.heat = Math.min(40, (S.lockerRoom.heat || 0) + 6 * newcomers.length);
+    S.roster.forEach((player) => {
+      if (prevSet.has(player.id) && player.persona === "quiet-pro") {
+        player.mood = clampMood((player.mood || 60) - 3);
+      }
+    });
+    const names = newcomers
+      .map((id) => {
+        const player = S.roster.find((item) => item.id === id);
+        return player ? player.name : id;
+      })
+      .join(", ");
+    pushLockerEvent(`Core shuffle: ${names} entered the eight.`);
+  }
+  S.lockerRoom.lastCoreIds = nextIds.slice();
+}
+function breakPairingsForPlayers(ids, blessed) {
+  if (!S.lockerRoom || !S.lockerRoom.pairings) return;
+  const knobs = lockerKnobs();
+  const leaving = new Set(ids || []);
+  Object.keys(S.lockerRoom.pairings).forEach((key) => {
+    const [a, b] = key.split("|");
+    if (!leaving.has(a) && !leaving.has(b)) return;
+    const status = ENGINE.pairingStatus(
+      S.lockerRoom.pairings[key].starts,
+      knobs.pairStarts,
+      knobs.pactStarts,
+    );
+    const stayedId = leaving.has(a) ? b : a;
+    const stayed = S.roster.find((player) => player.id === stayedId);
+    if (status === "pact" && stayed && !blessed) {
+      stayed.mood = clampMood((stayed.mood || 60) - 12);
+      stayed.wantsOut = true;
+      S.lockerRoom.heat = Math.min(40, (S.lockerRoom.heat || 0) + 10);
+      pushLockerEvent(`Pact broken in a trade. ${stayed.name} wants out.`);
+    }
+    delete S.lockerRoom.pairings[key];
+  });
+}
+function nominateCaptain(id) {
+  if (!S.started) return toast("Start a franchise first.");
+  if (!S.lockerRoom) return;
+  const knobs = lockerKnobs();
+  if ((S.week || 1) < (knobs.captainWeek || 6))
+    return toast(`The room will not accept a captain before week ${knobs.captainWeek || 6}.`);
+  if (S.lockerRoom.captainId) return toast("You already have a captain.");
+  if (teamTensionScore(S.team.abbr) > (knobs.captainTensionMax || 40))
+    return toast("Tension is too high to elect a captain.");
+  const nominee = S.roster.find((player) => player.id === id);
+  if (!nominee) return toast("Pick a captain.");
+  recordUndo("captain vote");
+  const approval = ENGINE.captainApproval(nominee, S.roster, DATA.personality || {});
+  if (approval >= (knobs.captainApproval || 0.5)) {
+    S.lockerRoom.captainId = nominee.id;
+    S.lockerRoom.heat = Math.max(0, (S.lockerRoom.heat || 0) - 8);
+    addLog("Captain", `${nominee.name} is the voice in the room.`);
+    pushLockerEvent(`${nominee.name} elected captain.`);
+    toast(`${nominee.name} is captain.`);
+  } else {
+    S.lockerRoom.heat = Math.min(40, (S.lockerRoom.heat || 0) + 12);
+    const snubbed = S.roster
+      .filter((player) => player.id !== nominee.id)
+      .slice()
+      .sort((a, b) => composite(b) - composite(a))
+      .find(
+        (player) =>
+          player.persona === "vocal-leader" ||
+          player.hiddenTrait === "instigator" ||
+          player.persona === "media-darling",
+      );
+    if (snubbed) {
+      snubbed.mood = clampMood((snubbed.mood || 60) - 6);
+      if (snubbed.hiddenTrait) snubbed.traitRevealed = true;
+      pushLockerEvent(`${snubbed.name} leaked after the failed captain vote.`);
+    }
+    addLog("Captain vote failed", `The room would not get behind ${nominee.name}.`);
+    toast("Captain vote failed. The room split.");
+  }
+  save();
+  render();
+}
+function spendInfluence(kind, playerId) {
+  if (!S.started) return toast("Start a franchise first.");
+  if (!S.lockerRoom) return;
+  if ((S.lockerRoom.influence || 0) < 1) return toast("No influence left this week.");
+  const player = S.roster.find((item) => item.id === playerId);
+  if (!player) return toast("Pick a player to spend influence on.");
+  if (kind === "bless" && !player.wantsOut) return toast(`${player.name} is not asking out.`);
+  recordUndo("locker-room influence");
+  S.lockerRoom.influence -= 1;
+  if (kind === "closed-door") {
+    player.mood = clampMood((player.mood || 60) + 8);
+    S.lockerRoom.heat = Math.max(0, (S.lockerRoom.heat || 0) - 8);
+    const star = rosterStar();
+    if (star && star.id !== player.id) {
+      star.mood = clampMood((star.mood || 60) - 4);
+      if (star.hiddenTrait === "fragile-ego")
+        S.lockerRoom.heat = Math.min(40, (S.lockerRoom.heat || 0) + 4);
+    }
+    addLog("Closed door", `Sat down with ${player.name}.`);
+    pushLockerEvent(`Closed door with ${player.name}.`);
+    toast(`Closed door with ${player.name}.`);
+  } else if (kind === "campaign") {
+    S.lockerRoom.campaignId = player.id;
+    player.mood = clampMood((player.mood || 60) + 2);
+    addLog("Campaign", `Front office is pushing ${player.name} for awards.`);
+    pushLockerEvent(`Campaigning for ${player.name}.`);
+    toast(`Campaigning for ${player.name}.`);
+  } else if (kind === "bless") {
+    player.tradeBlessed = true;
+    player.mood = clampMood((player.mood || 60) + 4);
+    S.lockerRoom.heat = Math.max(0, (S.lockerRoom.heat || 0) - 6);
+    addLog("Exit granted", `${player.name} can be moved without cratering a pact partner.`);
+    pushLockerEvent(`Green-lit ${player.name}'s exit.`);
+    toast(`${player.name} is available.`);
+  }
+  save();
+  render();
+}
+function claimCulture(id) {
+  if (!S.lockerRoom || S.lockerRoom.culture) return toast("Identity already locked this season.");
+  const knobs = lockerKnobs();
+  const need = knobs.cultureWeeks || 8;
+  const track = S.lockerRoom.cultureTrack || {};
+  if (!["grit", "lab", "star"].includes(id)) return;
+  if ((track[id] || 0) < need) return toast("That identity is not earned yet.");
+  recordUndo("culture identity");
+  S.lockerRoom.culture = id;
+  const labels = { grit: "Playoff Grit", lab: "Young Lab", star: "Star Vehicle" };
+  addLog("Identity", `This franchise is ${labels[id]}.`);
+  pushLockerEvent(`Identity locked: ${labels[id]}.`);
+  toast(`${labels[id]} locked in.`);
+  save();
+  render();
+}
+function applyOffseasonHarvest() {
+  if (!S.offseason || !Array.isArray(S.offseason.pendingResign)) return;
+  const knobs = lockerKnobs();
+  const hasInstigator = S.roster.some(
+    (player) => player.hiddenTrait === "instigator" && player.traitRevealed,
+  );
+  const kept = [];
+  S.offseason.pendingResign.forEach((player) => {
+    const outcome = ENGINE.harvestOutcome(player, {
+      seasonHeat: S.lockerRoom ? S.lockerRoom.seasonHeatPeak || 0 : 0,
+      dramaWalkHeat: knobs.dramaWalkHeat,
+      hometownBond: knobs.hometownBond,
+      spongeBond: knobs.spongeBond,
+      hasInstigator,
+    });
+    player.harvestTag = outcome.tag;
+    player.harvestSalaryMult = outcome.salaryMult;
+    if (outcome.walk) {
+      S.roster = S.roster.filter((item) => item.id !== player.id);
+      S.rotation = (S.rotation || []).filter((item) => item !== player.id);
+      player.team = "FA";
+      player.lastTeam = S.team.abbr;
+      if (!Array.isArray(S.freeAgents)) S.freeAgents = [];
+      if (!S.freeAgents.some((item) => item.id === player.id)) S.freeAgents.push(player);
+      const why =
+        outcome.tag === "drama" ? "walked after a hot locker room" : "walked after a minutes snub";
+      addLog("Walked", `${player.name} ${why}.`);
+      pushLockerEvent(`${player.name} walked (${why}).`);
+    } else kept.push(player);
+  });
+  S.offseason.pendingResign = kept;
+}
+function resetSeasonIntimacy() {
+  if (!S.lockerRoom) return;
+  (S.roster || []).forEach((player) => {
+    player.startsThisSeason = 0;
+    player.sitStreak = 0;
+    player.wantsOut = false;
+    player.tradeBlessed = false;
+  });
+  S.lockerRoom.pairings = {};
+  S.lockerRoom.captainId = null;
+  S.lockerRoom.culture = null;
+  S.lockerRoom.cultureTrack = { grit: 0, lab: 0, star: 0 };
+  S.lockerRoom.campaignId = null;
+  S.lockerRoom.lastCoreIds = [];
+  S.lockerRoom.seasonHeatPeak = 0;
+}
 function tickLockerRoom(week = S.week) {
   if (!S.lockerRoom) return;
   const knobs = lockerKnobs();
   if (S.lockerRoom.lastInfluenceWeek !== week) {
     S.lockerRoom.influence = knobs.influencePerWeek || 1;
     S.lockerRoom.lastInfluenceWeek = week;
-    S.lockerRoom.heat = Math.max(0, (S.lockerRoom.heat || 0) - 4);
+    let cool = 4;
+    if (S.lockerRoom.captainId) cool += 3;
+    if (S.lockerRoom.culture === "grit") cool += 3;
+    S.lockerRoom.heat = Math.max(0, (S.lockerRoom.heat || 0) - cool);
   }
   const report = userLockerReport();
   const tension = report.tension;
@@ -4544,7 +4983,10 @@ function tickLockerRoom(week = S.week) {
       pushLockerEvent(`${player.name}: ${label} revealed.`);
     }
   });
-  if (ENGINE.shouldBlowup(tension, random(), knobs.blowupTension, knobs.blowupChance)) {
+  const blowupChance =
+    (knobs.blowupChance || 0.14) *
+    (S.lockerRoom.culture === "grit" ? knobs.gritBlowupMult || 1.6 : 1);
+  if (ENGINE.shouldBlowup(tension, random(), knobs.blowupTension, blowupChance)) {
     const troublemakers = S.roster.filter((player) =>
       ["drama-prone", "fragile-ego", "instigator", "selfish"].includes(player.hiddenTrait),
     );
@@ -4564,26 +5006,6 @@ function tickLockerRoom(week = S.week) {
       pushLockerEvent(`Blowup: ${culprit.name} (${label}).`);
     }
   }
-}
-function mediateLockerRoom() {
-  if (!S.started) return toast("Start a franchise first.");
-  if (!S.lockerRoom) return;
-  if ((S.lockerRoom.influence || 0) < 1) return toast("No influence left this week.");
-  if (S.week < (S.lockerRoom.suppressedUntilWeek || 0))
-    return toast("The last mediation is still holding.");
-  recordUndo("locker-room mediation");
-  const knobs = lockerKnobs();
-  S.lockerRoom.influence -= 1;
-  S.lockerRoom.suppressedUntilWeek = S.week + (knobs.suppressWeeks || 2);
-  S.lockerRoom.heat = Math.max(0, (S.lockerRoom.heat || 0) - 20);
-  S.roster.forEach((player) => {
-    player.mood = Math.max(20, Math.min(99, (player.mood || 60) + 3));
-  });
-  addLog("Mediation", "Front office sat the room down. Tension is cooling for a couple of weeks.");
-  pushLockerEvent("Front office mediated a dispute.");
-  toast("Locker room mediated.");
-  save();
-  render();
 }
 function rollInjuries(g) {
   const checkTeam = (id) => {
@@ -4709,32 +5131,51 @@ function lockerRoomSection() {
   const report = userLockerReport();
   const knobs = lockerKnobs();
   const influence = S.lockerRoom ? S.lockerRoom.influence || 0 : 0;
-  const suppressed =
-    S.lockerRoom && S.week < (S.lockerRoom.suppressedUntilWeek || 0)
-      ? `Mediation holding through week ${S.lockerRoom.suppressedUntilWeek - 1}.`
-      : "No active mediation.";
-  const asstTraits = (S.coaches && S.coaches.assistant && S.coaches.assistant.traits) || [];
-  const disc = asstTraits.includes("disciplinarian")
-    ? `<p class="muted">${escapeHtml(S.coaches.assistant.name)} is keeping the chemistry penalty to 40%.</p>`
-    : `<p class="muted">Hire a Strict Disciplinarian assistant to blunt high-tension rosters.</p>`;
-  const conflictHtml = report.conflicts.length
-    ? report.conflicts
-        .slice(0, 4)
-        .map(
-          (row) =>
-            `<div class="mini">${escapeHtml(row.a)} vs ${escapeHtml(row.b)} · ${escapeHtml(personaLabel(row.traits[0]) || hiddenLabel(row.traits[0]))} / ${escapeHtml(personaLabel(row.traits[1]) || hiddenLabel(row.traits[1]))}</div>`,
-        )
-        .join("")
-    : '<div class="mini">No active clashes in the top eight.</div>';
-  const synHtml = report.synergies.length
-    ? report.synergies
-        .slice(0, 3)
-        .map(
-          (row) =>
-            `<div class="mini">${escapeHtml(row.a)} + ${escapeHtml(row.b)} · ${escapeHtml(row.type)}</div>`,
-        )
-        .join("")
-    : '<div class="mini">No mentor/glue pairings firing yet.</div>';
+  const need = knobs.cultureWeeks || 8;
+  const track = (S.lockerRoom && S.lockerRoom.cultureTrack) || { grit: 0, lab: 0, star: 0 };
+  const cultureLabels = { grit: "Playoff Grit", lab: "Young Lab", star: "Star Vehicle" };
+  const captain =
+    S.lockerRoom && S.lockerRoom.captainId
+      ? S.roster.find((player) => player.id === S.lockerRoom.captainId)
+      : null;
+  const playerOpts = S.roster
+    .slice()
+    .sort((a, b) => composite(b) - composite(a))
+    .map(
+      (player) =>
+        `<option value="${escapeAttr(player.id)}">${escapeHtml(player.name)} · bond ${Math.round(player.bond || 50)}${player.wantsOut ? " · wants out" : ""}</option>`,
+    )
+    .join("");
+  const pairingHtml = Object.keys((S.lockerRoom && S.lockerRoom.pairings) || {})
+    .map((key) => {
+      const [a, b] = key.split("|");
+      const pa = S.roster.find((player) => player.id === a);
+      const pb = S.roster.find((player) => player.id === b);
+      if (!pa || !pb) return "";
+      const starts = S.lockerRoom.pairings[key].starts || 0;
+      const status = ENGINE.pairingStatus(starts, knobs.pairStarts, knobs.pactStarts);
+      return `<div class="mini">${escapeHtml(pa.name)} + ${escapeHtml(pb.name)} · ${status} ${starts}/${knobs.pactStarts}</div>`;
+    })
+    .filter(Boolean)
+    .slice(0, 4)
+    .join("");
+  const cultureLine =
+    S.lockerRoom && S.lockerRoom.culture
+      ? `<p class="muted">Identity: <b>${cultureLabels[S.lockerRoom.culture]}</b> (locked this season).</p>`
+      : `<p class="muted">Earn 8 weeks on a track, then claim one identity.</p>
+       <div class="mini">Grit ${track.grit || 0}/${need} · Lab ${track.lab || 0}/${need} · Star ${track.star || 0}/${need}</div>
+       <div class="actions" style="margin-top:8px">${["grit", "lab", "star"]
+         .map(
+           (id) =>
+             `<button class="btn secondary" data-culture="${id}" ${(track[id] || 0) < need ? "disabled" : ""}>${cultureLabels[id]}</button>`,
+         )
+         .join("")}</div>`;
+  const captainBlock = captain
+    ? `<p class="muted">Captain: <b>${escapeHtml(captain.name)}</b> · weekly calm, +2 in playoffs.</p>`
+    : S.week >= (knobs.captainWeek || 6)
+      ? `<div class="field"><label>Nominate captain</label><select id="lr-captain">${playerOpts}</select></div>
+         <div class="actions"><button class="btn secondary" data-action="nominateCaptain" ${teamTensionScore(S.team.abbr) > (knobs.captainTensionMax || 40) ? "disabled" : ""}>Hold the vote</button></div>`
+      : `<p class="muted">Captain vote unlocks week ${knobs.captainWeek || 6} if tension is under ${knobs.captainTensionMax || 40}.</p>`;
   const events = ((S.lockerRoom && S.lockerRoom.events) || [])
     .slice(0, 4)
     .map(
@@ -4742,7 +5183,20 @@ function lockerRoomSection() {
         `<div class="logItem"><b>Week ${event.week}</b><p class="muted">${escapeHtml(event.text)}</p></div>`,
     )
     .join("");
-  return `<section class="card"><div class="sectionTitle"><h3>Locker Room</h3><span>tension ${report.tension} · chem ${Math.round(report.chemistry * 100)}%</span></div><div class="cardPad"><div class="meter"><span>Team tension</span><div class="bar"><i style="width:${report.tension}%"></i></div><b>${report.tension}</b></div><p class="muted">${suppressed} Influence this week: ${influence}/${knobs.influencePerWeek || 1}.</p>${disc}<div class="layout2" style="margin-top:12px"><div><h3>Clashes</h3>${conflictHtml}</div><div><h3>Synergies</h3>${synHtml}</div></div><div class="actions" style="margin-top:14px"><button class="btn" data-action="mediateLockerRoom" ${influence < 1 ? "disabled" : ""}>Mediate dispute</button></div><div class="log" style="margin-top:14px">${events || '<div class="empty">No locker-room events yet. Play games to surface hidden traits.</div>'}</div></div></section>`;
+  return `<section class="card"><div class="sectionTitle"><h3>Locker Room</h3><span>tension ${report.tension} · chem ${Math.round(report.chemistry * 100)}%</span></div><div class="cardPad"><div class="meter"><span>Team tension</span><div class="bar"><i style="width:${report.tension}%"></i></div><b>${report.tension}</b></div>
+    ${captainBlock}${cultureLine}
+    <div class="layout2" style="margin-top:12px"><div><h3>On-court pairs</h3>${pairingHtml || '<div class="mini">Share the floor for 6 starts to pair; 12 for a pact.</div>'}</div><div><h3>Clashes</h3>${
+      report.conflicts.length
+        ? report.conflicts
+            .slice(0, 3)
+            .map((row) => `<div class="mini">${escapeHtml(row.a)} vs ${escapeHtml(row.b)}</div>`)
+            .join("")
+        : '<div class="mini">No active clashes in the top eight.</div>'
+    }</div></div>
+    <div class="field" style="margin-top:12px"><label>Spend influence (1 / week)</label><select id="lr-player">${playerOpts}</select></div>
+    <div class="actions"><button class="btn" data-action="closedDoor" ${influence < 1 ? "disabled" : ""}>Closed door</button><button class="btn secondary" data-action="campaignPlayer" ${influence < 1 ? "disabled" : ""}>Campaign</button><button class="btn secondary" data-action="blessExit" ${influence < 1 ? "disabled" : ""}>Green-light exit</button></div>
+    <p class="muted" style="margin-top:8px">Influence this week: ${influence}/${knobs.influencePerWeek || 1}. Closed door cools her (star may bristle). Campaign boosts awards. Green-light only works if she wants out.</p>
+    <div class="log" style="margin-top:14px">${events || '<div class="empty">Play games. Minutes, pairings, and files show up here.</div>'}</div></div></section>`;
 }
 function coachingView() {
   return `${kpis()}${coachingStaffSection()}<div style="margin-top:18px">${lockerRoomSection()}</div><div style="margin-top:18px">${nextGamesSection()}</div><div class="layout2" style="margin-top:18px"><div>${weeklyFocusSection()}${devFocusSection()}</div><div>${pressSection()}${injurySection()}</div></div>`;
@@ -5150,7 +5604,12 @@ if (typeof module !== "undefined" && module.exports) {
     userLockerReport,
     teamChemistryMult,
     teamTensionScore,
-    mediateLockerRoom,
+    tickMinutesAndCulture,
+    nominateCaptain,
+    spendInfluence,
+    claimCulture,
+    applyOffseasonHarvest,
+    resetSeasonIntimacy,
     tickLockerRoom,
     ensureUpcomingUserPick,
     rehomeOrphanUserPicks,

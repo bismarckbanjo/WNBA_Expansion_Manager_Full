@@ -818,22 +818,20 @@ test("migrate stamps public personas onto existing players", () => {
   assert.ok(migrated.lockerRoom);
 });
 
-test("mediateLockerRoom spends weekly influence and suppresses tension", () => {
+test("closed-door influence cools one player and spends the week", () => {
   const g = loadGame(1);
   g.S.started = true;
   g.S.week = 4;
-  g.S.roster = [mkPlayer(80, { id: "a", mood: 50, persona: "quiet-pro" })];
-  g.S.lockerRoom = {
-    heat: 20,
-    suppressedUntilWeek: 0,
-    influence: 1,
-    lastInfluenceWeek: 4,
-    events: [],
-  };
-  g.mediateLockerRoom();
+  g.S.roster = [
+    mkPlayer(80, { id: "a", name: "Amp", mood: 50, persona: "quiet-pro", bond: 50 }),
+    mkPlayer(90, { id: "star", name: "Star", mood: 60, persona: "vocal-leader", bond: 50 }),
+  ];
+  g.S.lockerRoom.heat = 20;
+  g.S.lockerRoom.influence = 1;
+  g.spendInfluence("closed-door", "a");
   assert.strictEqual(g.S.lockerRoom.influence, 0);
-  assert.ok(g.S.lockerRoom.suppressedUntilWeek > 4);
   assert.ok(g.S.roster[0].mood > 50);
+  assert.ok(g.S.roster[1].mood < 60);
 });
 
 test("team chemistry multiplier drops for a tense user rotation", () => {
@@ -857,4 +855,125 @@ test("team chemistry multiplier drops for a tense user rotation", () => {
   const staffed = g.teamChemistryMult(g.S.team.abbr);
   assert.ok(tense < 1);
   assert.ok(staffed > tense);
+});
+
+function nineDeep(g, extra = {}) {
+  const roster = [
+    mkPlayer(80, { id: "c1", pos: "G", persona: "competitor", name: "C1", ...extra.c1 }),
+    mkPlayer(80, { id: "c2", pos: "G", persona: "competitor", name: "C2" }),
+    mkPlayer(80, { id: "c3", pos: "F", persona: "competitor", name: "C3" }),
+    mkPlayer(78, { id: "m1", pos: "F", persona: "mentor", name: "Mentor", age: 32 }),
+    mkPlayer(70, { id: "s1", pos: "G", persona: "sponge", name: "Sponge", age: 22 }),
+    mkPlayer(76, { id: "g1", pos: "C", persona: "gym-rat", name: "Gym" }),
+    mkPlayer(74, { id: "l1", pos: "F", persona: "locker-glue", name: "Glue" }),
+    mkPlayer(72, { id: "q1", pos: "C", persona: "quiet-pro", name: "Quiet" }),
+    mkPlayer(60, { id: "b1", pos: "G", persona: "competitor", name: "Bench", ...extra.bench }),
+  ];
+  g.S.roster = roster;
+  g.S.rotation = roster.map((p) => p.id);
+  g.S.started = true;
+  g.S.lockerRoom.pairings = {};
+  g.S.lockerRoom.lastCoreIds = [];
+  g.S.lockerRoom.events = [];
+  return roster;
+}
+
+test("sitting a competitor three games files a wants-out", () => {
+  const g = loadGame(1);
+  nineDeep(g);
+  g.S.rotation = g.S.roster.map((p) => p.id);
+  for (let i = 0; i < 3; i++) g.tickMinutesAndCulture();
+  const bench = g.S.roster.find((p) => p.id === "b1");
+  assert.strictEqual(bench.wantsOut, true);
+  assert.ok((bench.sitStreak || 0) >= 3);
+});
+
+test("six shared starts create an on-court pairing", () => {
+  const g = loadGame(1);
+  nineDeep(g);
+  for (let i = 0; i < 6; i++) g.tickMinutesAndCulture();
+  const key = g.ENGINE.pairKey("c1", "c2");
+  const entry = g.S.lockerRoom.pairings[key];
+  assert.ok(entry && entry.starts >= 6);
+  assert.strictEqual(g.ENGINE.pairingStatus(entry.starts, 6, 12), "paired");
+});
+
+test("captain vote succeeds with glue and fails when the room clashes", () => {
+  const g = loadGame(1);
+  g.S.started = true;
+  g.S.week = 6;
+  g.S.roster = [
+    mkPlayer(80, { id: "glue", name: "Glue", persona: "locker-glue", bond: 70 }),
+    mkPlayer(80, {
+      id: "loyal",
+      name: "Loyal",
+      persona: "quiet-pro",
+      hiddenTrait: "loyal",
+      bond: 60,
+    }),
+  ];
+  g.S.lockerRoom.heat = 0;
+  g.nominateCaptain("glue");
+  assert.strictEqual(g.S.lockerRoom.captainId, "glue");
+});
+
+test("culture track unlocks grit after eight competitor-heavy rotations", () => {
+  const g = loadGame(1);
+  nineDeep(g);
+  for (let i = 0; i < 8; i++) g.tickMinutesAndCulture();
+  assert.ok(g.S.lockerRoom.cultureTrack.grit >= 8);
+  g.claimCulture("grit");
+  assert.strictEqual(g.S.lockerRoom.culture, "grit");
+});
+
+test("promoting into the eight heats the core", () => {
+  const g = loadGame(1);
+  nineDeep(g);
+  g.tickMinutesAndCulture();
+  const before = g.S.lockerRoom.heat || 0;
+  g.S.rotation = ["b1"].concat(g.S.rotation.filter((id) => id !== "b1"));
+  g.tickMinutesAndCulture();
+  assert.ok(g.S.lockerRoom.heat > before);
+});
+
+test("year-2 harvest walks a drama-prone player after a hot room", () => {
+  const g = loadGame(1);
+  const drama = mkPlayer(80, {
+    id: "d1",
+    name: "Drama",
+    persona: "flashy",
+    hiddenTrait: "drama-prone",
+    years: 0,
+    bond: 40,
+  });
+  g.S.roster = [drama];
+  g.S.lockerRoom.seasonHeatPeak = 30;
+  g.S.offseason = { pendingResign: [drama] };
+  g.applyOffseasonHarvest();
+  assert.strictEqual(g.S.offseason.pendingResign.length, 0);
+  assert.ok(g.S.freeAgents.some((p) => p.id === "d1"));
+});
+
+test("green-light exit marks a restless player trade-blessed", () => {
+  const g = loadGame(1);
+  g.S.started = true;
+  const restless = mkPlayer(80, { id: "out", name: "Out", persona: "competitor", wantsOut: true });
+  g.S.roster = [restless];
+  g.S.lockerRoom.influence = 1;
+  g.spendInfluence("bless", "out");
+  assert.strictEqual(g.S.roster[0].tradeBlessed, true);
+});
+
+test("harvest hometown discount tags a high-bond mentor", () => {
+  const g = loadGame(1);
+  const mentor = mkPlayer(80, {
+    id: "vet",
+    persona: "mentor",
+    bond: 80,
+    years: 0,
+    hiddenTrait: null,
+  });
+  const outcome = g.ENGINE.harvestOutcome(mentor, { seasonHeat: 0, hometownBond: 60 });
+  assert.strictEqual(outcome.tag, "hometown");
+  assert.ok(outcome.salaryMult < 1);
 });

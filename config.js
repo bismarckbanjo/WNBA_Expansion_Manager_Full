@@ -1,7 +1,7 @@
 // Versioned simulation knobs. Saves record the version so future migrations can
 // explain balance changes without scattering magic numbers through the engine.
 window.GAME_BALANCE = Object.freeze({
-  version: 2,
+  version: 3,
   compositeWeights: Object.freeze({
     scoring: 0.19,
     shooting: 0.14,
@@ -28,6 +28,22 @@ window.GAME_BALANCE = Object.freeze({
     blowupChance: 0.14,
     influencePerWeek: 1,
     suppressWeeks: 2,
+    pairStarts: 6,
+    pactStarts: 12,
+    sitFile: 3,
+    captainWeek: 6,
+    captainTensionMax: 40,
+    captainApproval: 0.5,
+    cultureWeeks: 8,
+    campaignBoost: 0.15,
+    blessedTradeValue: 160,
+    hometownBond: 60,
+    spongeBond: 50,
+    dramaWalkHeat: 28,
+    gritFreezeTension: 55,
+    gritBlowupMult: 1.6,
+    pairingTension: 5,
+    pactTension: 10,
   }),
   tradeDeadlineWeek: 12,
   undoLimit: 5,

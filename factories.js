@@ -67,6 +67,11 @@ function ensurePersonality(player) {
     if (player.hiddenTrait === undefined) player.hiddenTrait = assigned.hiddenTrait;
     if (player.traitRevealed === undefined) player.traitRevealed = false;
   }
+  if (!Number.isFinite(player.bond)) player.bond = 50;
+  if (!Number.isFinite(player.startsThisSeason)) player.startsThisSeason = 0;
+  if (!Number.isFinite(player.sitStreak)) player.sitStreak = 0;
+  if (player.wantsOut !== true) player.wantsOut = !!player.wantsOut;
+  if (player.tradeBlessed !== true) player.tradeBlessed = !!player.tradeBlessed;
   return player;
 }
 
