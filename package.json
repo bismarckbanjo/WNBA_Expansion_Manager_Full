@@ -4,9 +4,17 @@
   "description": "WNBA Expansion Manager — vanilla-JS browser game with a Node test harness.",
   "private": true,
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "lint": "eslint .",
+    "format": "prettier --write \"*.{js,json,css,html,md,webmanifest}\" \"test/**/*.js\" \".github/**/*.yml\"",
+    "format:check": "prettier --check \"*.{js,json,css,html,md,webmanifest}\" \"test/**/*.js\" \".github/**/*.yml\"",
+    "check": "npm run lint && npm run format:check && npm test"
   },
   "devDependencies": {
-    "jsdom": "^24.0.0"
+    "axe-core": "^4.13.0",
+    "eslint": "^9.39.5",
+    "globals": "^15.15.0",
+    "jsdom": "^24.0.0",
+    "prettier": "^3.9.6"
   }
 }

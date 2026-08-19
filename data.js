@@ -704,17 +704,13 @@ window.GAME_DATA = {
     inspiring: "Inspiring (after a loss, +3 all channels in next game)",
     clutch: "Clutch (sim variance tightened — better in close games)",
     "veteran-tactician": "Veteran Tactician (game plan bonus doubled)",
-    "championship-pedigree":
-      "Championship Pedigree (small variance bonus in playoff games)",
-    "international-experience":
-      "International Experience (foreign rookies grow faster)",
+    "championship-pedigree": "Championship Pedigree (small variance bonus in playoff games)",
+    "international-experience": "International Experience (no special bonus yet — flavor)",
     "young-coach": "Young Coach (no special bonus yet — open to growth)",
     "young-developer": "Young Developer (rookies +0.2 dev gain)",
-    "film-buff":
-      "Film Buff (Film Study focus gives +2 to all channels instead of +1)",
+    "film-buff": "Film Buff (Film Study focus gives +2 to all channels instead of +1)",
     "scout-genius": "Scout Genius (auto-scout next opponent each week)",
-    "defensive-coordinator":
-      "Defensive Coordinator (game plan grants +4/-2 instead of +3/-1)",
+    "defensive-coordinator": "Defensive Coordinator (game plan grants +4/-2 instead of +3/-1)",
     motivator: "Motivator (+2 mood per user game)",
     mentor: "Mentor (all dev multipliers +0.3)",
     "shooting-specialist": "Shooting Specialist (1.5x shooting growth)",
@@ -5342,58 +5338,3 @@ window.GAME_DATA = {
     ]),
   ],
 };
-function team(id, name, primary, secondary, status, players) {
-  return { id, name, primary, secondary, status, players };
-}
-function p(
-  name,
-  pos,
-  team,
-  salary,
-  years,
-  scouting,
-  strengths,
-  weaknesses,
-  protectedPlayer,
-  scoring,
-  shooting,
-  playmaking,
-  defense,
-  rebounding,
-  athleticism,
-  iq,
-  potential,
-  archetype,
-) {
-  return {
-    id: slug(name + "-" + team),
-    name,
-    pos,
-    team,
-    salary,
-    years,
-    scouting,
-    strengths,
-    weaknesses,
-    protected: protectedPlayer,
-    ratings: {
-      scoring,
-      shooting,
-      playmaking,
-      defense,
-      rebounding,
-      athleticism,
-      iq,
-      potential,
-    },
-    archetype,
-    mood: 55 + Math.floor(Math.random() * 30),
-    injury: null,
-  };
-}
-function slug(s) {
-  return s
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/(^-|-$)/g, "");
-}

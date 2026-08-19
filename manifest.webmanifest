@@ -1,0 +1,17 @@
+{
+  "name": "Baseline — WNBA Expansion Front Office",
+  "short_name": "Baseline",
+  "description": "A local-first WNBA expansion front-office simulation.",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#f7f4ef",
+  "theme_color": "#18120f",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

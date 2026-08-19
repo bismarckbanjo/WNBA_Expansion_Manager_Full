@@ -1,13 +1,18 @@
 const DATA = window.GAME_DATA;
+const BALANCE = window.GAME_BALANCE;
+const ENGINE = window.GAME_ENGINE;
+const SCHEMA = window.GAME_SCHEMA;
 const LS_KEY = "wnbaExpansionFullBuild.v2";
-const SAVE_VERSION = 3;
+const ACTIVE_SLOT_KEY = "wnbaExpansion.activeSlot.v1";
+const SAVE_INDEX_KEY = "wnbaExpansion.saveIndex.v1";
+const SLOT_PREFIX = "wnbaExpansion.slot.v1.";
+const SAVE_VERSION = 4;
 const money = (n) => "$" + Math.round(n).toLocaleString();
 const shortMoney = (n) =>
   n >= 1000000
     ? "$" + (n / 1000000).toFixed(n % 1000000 ? 1 : 0) + "M"
     : "$" + Math.round(n / 1000) + "K";
-const avg = (arr) =>
-  arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : 0;
+const avg = (arr) => (arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : 0);
 const clone = (x) => JSON.parse(JSON.stringify(x));
 function escapeHtml(value) {
   return String(value ?? "")
@@ -17,9 +22,41 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
 }
-let S = load() || migrate(freshState());
+const escapeAttr = escapeHtml;
+function firstTag(value) {
+  return String(value || "").split(",")[0] || "—";
+}
+function contrastText(hex) {
+  const value = String(hex || "").replace("#", "");
+  const normalized =
+    value.length === 3
+      ? value
+          .split("")
+          .map((part) => part + part)
+          .join("")
+      : value;
+  if (!/^[0-9a-f]{6}$/i.test(normalized)) return "#fff";
+  const red = parseInt(normalized.slice(0, 2), 16);
+  const green = parseInt(normalized.slice(2, 4), 16);
+  const blue = parseInt(normalized.slice(4, 6), 16);
+  return (red * 299 + green * 587 + blue * 114) / 1000 >= 145 ? "#111" : "#fff";
+}
+function badgeStyle(color) {
+  return `background:${escapeAttr(color)};color:${contrastText(color)}`;
+}
+const PLAYER_RATING_KEYS = [
+  "scoring",
+  "shooting",
+  "playmaking",
+  "defense",
+  "rebounding",
+  "athleticism",
+  "iq",
+  "potential",
+];
+let activeSlotId = getActiveSlotId();
+let S = load() || normalizeSave(freshState());
 let tab = S.started ? "dashboard" : "setup";
-let selectedCity = DATA.expansionCities[0];
 let modal = null;
 let draftFilters = {
   q: "",
@@ -37,9 +74,14 @@ let trade = {
   otherPick: 0,
   query: "",
 };
+let lastUndo = null;
+let modalReturnFocusSelector = null;
+let pendingImport = null;
 function freshState() {
+  const rngSeed = Math.floor(Math.random() * 0xffffffff) || 1;
   return {
     started: false,
+    saveName: "My Franchise",
     week: 1,
     phase: "Expansion Build",
     team: {
@@ -57,12 +99,17 @@ function freshState() {
     season: null,
     year: 2026,
     saveVersion: SAVE_VERSION,
+    balanceVersion: BALANCE.version,
+    rngSeed,
+    rngState: rngSeed,
     lastSaved: new Date().toISOString(),
     offseason: null,
     customRookies: {},
+    freeAgents: [],
     coaching: {
       weeklyFocus: "none",
-      weeklyFocusWeek: 1,
+      focusWeek: null,
+      lastTransitionWeek: 0,
       devFocus: { playerId: null, rating: "scoring" },
       gamePlans: {},
       pendingPress: null,
@@ -95,25 +142,49 @@ function freshState() {
         done: false,
       },
     ],
-    reports: [],
   };
 }
 function migrate(s) {
   if (!s) return s;
-  if (typeof s.year !== "number") s.year = 2026;
+  if (typeof s.year !== "number" || !Number.isFinite(s.year)) {
+    const parsedYear = parseInt(s.year, 10);
+    s.year = Number.isFinite(parsedYear) ? parsedYear : 2026;
+  }
   if (s.offseason === undefined) s.offseason = null;
-  if (!s.customRookies || typeof s.customRookies !== "object")
-    s.customRookies = {};
+  if (s.offseason && typeof s.offseason === "object") {
+    if (!Array.isArray(s.offseason.picks)) s.offseason.picks = [];
+    if (!Array.isArray(s.offseason.draftOrder)) s.offseason.draftOrder = [];
+    if (!Array.isArray(s.offseason.rookieClass)) s.offseason.rookieClass = [];
+    if (!Array.isArray(s.offseason.agingReport)) s.offseason.agingReport = [];
+  }
+  if (!s.customRookies || typeof s.customRookies !== "object") s.customRookies = {};
+  Object.keys(s.customRookies).forEach((year) => {
+    if (!Array.isArray(s.customRookies[year])) s.customRookies[year] = [];
+  });
+  if (!Array.isArray(s.freeAgents)) s.freeAgents = [];
+  if (s.season && typeof s.season === "object") {
+    if (!Array.isArray(s.season.schedule)) s.season = null;
+    else {
+      if (!s.season.records || typeof s.season.records !== "object") s.season.records = {};
+      if (!Array.isArray(s.season.results)) s.season.results = [];
+    }
+  }
+  if (s.playoffs && typeof s.playoffs === "object" && !Array.isArray(s.playoffs.rounds)) {
+    s.playoffs = null;
+  }
   if (!s.coaching) {
     s.coaching = {
       weeklyFocus: "none",
-      weeklyFocusWeek: s.week || 1,
+      focusWeek: null,
+      lastTransitionWeek: 0,
       devFocus: { playerId: null, rating: "scoring" },
       gamePlans: {},
       pendingPress: null,
       pressLog: [],
     };
   }
+  if (typeof s.coaching.lastTransitionWeek !== "number") s.coaching.lastTransitionWeek = 0;
+  if (s.coaching.focusWeek === undefined) s.coaching.focusWeek = null;
   if (s.gameDay === undefined) s.gameDay = null;
   if (s.postGame === undefined) s.postGame = null;
   if (s.playoffs === undefined) s.playoffs = null;
@@ -121,20 +192,18 @@ function migrate(s) {
   if (s.pendingAwards === undefined) s.pendingAwards = null;
   if (!s.coaches) s.coaches = {};
   // Repair each role independently so a partial old save can't leave a coach undefined.
-  if (!s.coaches.head)
-    s.coaches.head = JSON.parse(JSON.stringify(DATA.userStaffDefaults.head));
+  if (!s.coaches.head) s.coaches.head = JSON.parse(JSON.stringify(DATA.userStaffDefaults.head));
   if (typeof s.saveVersion !== "number") s.saveVersion = 1;
+  if (typeof s.balanceVersion !== "number") s.balanceVersion = BALANCE.version;
+  if (!Number.isInteger(s.rngSeed)) s.rngSeed = Math.floor(Math.random() * 0xffffffff) || 1;
+  if (!Number.isInteger(s.rngState)) s.rngState = s.rngSeed;
   if (!s.lastSaved) s.lastSaved = new Date().toISOString();
   if (s.saveVersion < SAVE_VERSION) s.saveVersion = SAVE_VERSION;
   if (!s.coaches.assistant)
-    s.coaches.assistant = JSON.parse(
-      JSON.stringify(DATA.userStaffDefaults.assistant),
-    );
-  if (!s.coaches.dev)
-    s.coaches.dev = JSON.parse(JSON.stringify(DATA.userStaffDefaults.dev));
+    s.coaches.assistant = JSON.parse(JSON.stringify(DATA.userStaffDefaults.assistant));
+  if (!s.coaches.dev) s.coaches.dev = JSON.parse(JSON.stringify(DATA.userStaffDefaults.dev));
   if (s.coaches.pendingBuff === undefined) s.coaches.pendingBuff = null;
-  if (typeof s.coaches.devAccumulator !== "number")
-    s.coaches.devAccumulator = 0;
+  if (typeof s.coaches.devAccumulator !== "number") s.coaches.devAccumulator = 0;
   // Stats foundations for every player
   const ensureStats = (p) => {
     if (!p.seasonStats) p.seasonStats = { gp: 0, pts: 0, reb: 0, ast: 0, w: 0 };
@@ -153,26 +222,146 @@ function migrate(s) {
   (s.teams || []).forEach((t) => (t.players || []).forEach(ensureInjury));
   return s;
 }
-// Structural guard: a parseable-but-incomplete object (e.g. {}) survives migrate()
-// but would crash render() on the first S.team/S.roster access and brick the app.
+function isRecord(value) {
+  return SCHEMA.isRecord(value);
+}
+function isValidPlayer(player) {
+  return SCHEMA.isValidPlayer(player, PLAYER_RATING_KEYS);
+}
+function isValidTeam(team) {
+  return SCHEMA.isValidTeam(team, PLAYER_RATING_KEYS);
+}
+// Validate the complete shape used by render and the simulation before imported
+// state can replace the current save. This is intentionally stricter than a
+// top-level presence check: malformed nested teams/players used to pass import.
 function isValidSave(s) {
   return !!(
-    s &&
-    typeof s === "object" &&
-    s.team &&
-    typeof s.team === "object" &&
+    isRecord(s) &&
+    isRecord(s.team) &&
     typeof s.team.city === "string" &&
+    typeof s.team.nickname === "string" &&
+    typeof s.team.abbr === "string" &&
+    typeof s.team.arena === "string" &&
+    typeof s.team.primary === "string" &&
+    typeof s.team.secondary === "string" &&
     Array.isArray(s.roster) &&
-    Array.isArray(s.teams)
+    s.roster.every(isValidPlayer) &&
+    Array.isArray(s.waived) &&
+    s.waived.every(isValidPlayer) &&
+    Array.isArray(s.teams) &&
+    s.teams.length > 0 &&
+    s.teams.every(isValidTeam) &&
+    new Set(s.teams.map((team) => team.id)).size === s.teams.length &&
+    isRecord(s.picks) &&
+    Number.isInteger(s.picks.you) &&
+    s.picks.you >= 0 &&
+    Number.isInteger(s.picks.league) &&
+    s.picks.league >= 0 &&
+    Array.isArray(s.objectives) &&
+    isRecord(s.coaching) &&
+    isRecord(s.coaches) &&
+    Array.isArray(s.log) &&
+    isRecord(s.customRookies) &&
+    Object.values(s.customRookies).every((list) => Array.isArray(list)) &&
+    Array.isArray(s.freeAgents) &&
+    s.freeAgents.every(isValidPlayer) &&
+    Number.isFinite(s.year) &&
+    !s.teams.some((team) => team.id === s.team.abbr) &&
+    isValidSeason(s.season) &&
+    isValidPlayoffs(s.playoffs) &&
+    isValidOffseason(s.offseason)
   );
+}
+function isValidSeason(season) {
+  if (season === null || season === undefined) return true;
+  return !!(
+    isRecord(season) &&
+    Array.isArray(season.schedule) &&
+    isRecord(season.records) &&
+    Array.isArray(season.results)
+  );
+}
+function isValidPlayoffs(playoffs) {
+  if (playoffs === null || playoffs === undefined) return true;
+  return !!(isRecord(playoffs) && Array.isArray(playoffs.rounds));
+}
+function isValidOffseason(offseason) {
+  if (offseason === null || offseason === undefined) return true;
+  return !!(
+    isRecord(offseason) &&
+    typeof offseason.stage === "string" &&
+    Array.isArray(offseason.picks) &&
+    Array.isArray(offseason.draftOrder) &&
+    Array.isArray(offseason.rookieClass)
+  );
+}
+function normalizeSave(input) {
+  if (!isRecord(input)) return null;
+  const base = freshState();
+  const s = migrate(input);
+  s.saveName =
+    typeof s.saveName === "string" && s.saveName.trim() ? s.saveName.trim() : base.saveName;
+  s.team = { ...base.team, ...(isRecord(s.team) ? s.team : {}) };
+  s.waived = Array.isArray(s.waived) ? s.waived : [];
+  s.picks = { ...base.picks, ...(isRecord(s.picks) ? s.picks : {}) };
+  s.objectives = Array.isArray(s.objectives) ? s.objectives : base.objectives;
+  s.log = Array.isArray(s.log) ? s.log : [];
+  s.coaching = {
+    ...base.coaching,
+    ...(isRecord(s.coaching) ? s.coaching : {}),
+    devFocus: {
+      ...base.coaching.devFocus,
+      ...(isRecord(s.coaching && s.coaching.devFocus) ? s.coaching.devFocus : {}),
+    },
+    gamePlans: isRecord(s.coaching && s.coaching.gamePlans) ? s.coaching.gamePlans : {},
+    pressLog: Array.isArray(s.coaching && s.coaching.pressLog) ? s.coaching.pressLog : [],
+  };
+  s.customRookies = isRecord(s.customRookies) ? s.customRookies : {};
+  s.awards = Array.isArray(s.awards) ? s.awards : [];
+  s.freeAgents = Array.isArray(s.freeAgents) ? s.freeAgents : [];
+  if (typeof s.year !== "number" || !Number.isFinite(s.year)) s.year = 2026;
+  s.team.abbr = uniqueAbbrAgainst(s.team.abbr, s.team.city, s.team.nickname, s.teams);
+  return isValidSave(s) ? s : null;
 }
 function load() {
   try {
-    const parsed = migrate(JSON.parse(localStorage.getItem(LS_KEY)));
-    return isValidSave(parsed) ? parsed : null;
+    const slotRaw = localStorage.getItem(slotStorageKey(activeSlotId));
+    const legacyRaw = localStorage.getItem(LS_KEY);
+    return normalizeSave(JSON.parse(slotRaw || legacyRaw));
   } catch {
     return null;
   }
+}
+function slotStorageKey(id) {
+  return SLOT_PREFIX + id;
+}
+function getActiveSlotId() {
+  try {
+    return localStorage.getItem(ACTIVE_SLOT_KEY) || "default";
+  } catch {
+    return "default";
+  }
+}
+function readSaveIndex() {
+  try {
+    const value = JSON.parse(localStorage.getItem(SAVE_INDEX_KEY));
+    return Array.isArray(value) ? value : [];
+  } catch {
+    return [];
+  }
+}
+function writeSaveIndex(index) {
+  localStorage.setItem(SAVE_INDEX_KEY, JSON.stringify(index));
+}
+function updateSaveIndex() {
+  const index = readSaveIndex().filter((slot) => slot.id !== activeSlotId);
+  index.push({
+    id: activeSlotId,
+    name: S.saveName,
+    year: S.year,
+    updatedAt: S.lastSaved,
+  });
+  writeSaveIndex(index.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)));
 }
 function save() {
   if (_saveTimer) {
@@ -180,13 +369,29 @@ function save() {
     _saveTimer = null;
   }
   S.saveVersion = SAVE_VERSION;
+  S.balanceVersion = BALANCE.version;
   S.lastSaved = new Date().toISOString();
-  localStorage.setItem(LS_KEY, JSON.stringify(S));
+  try {
+    const serialized = JSON.stringify(S);
+    localStorage.setItem(slotStorageKey(activeSlotId), serialized);
+    localStorage.setItem(ACTIVE_SLOT_KEY, activeSlotId);
+    if (activeSlotId === "default") localStorage.setItem(LS_KEY, serialized);
+    updateSaveIndex();
+    return true;
+  } catch (error) {
+    console.error("Unable to save franchise state", error);
+    if (!storageErrorShown) {
+      storageErrorShown = true;
+      toast("Autosave failed. Export your save from Admin before closing.");
+    }
+    return false;
+  }
 }
 // Debounced autosave used by render() so rapid UI updates don't each pay for a
 // full serialize. Explicit save() calls (game actions) still persist immediately,
 // and a beforeunload flush guarantees nothing is lost on exit.
 let _saveTimer = null;
+let storageErrorShown = false;
 function queueSave() {
   if (_saveTimer) clearTimeout(_saveTimer);
   _saveTimer = setTimeout(() => {
@@ -199,12 +404,34 @@ if (typeof window !== "undefined" && window.addEventListener) {
     if (_saveTimer) save();
   });
   window.addEventListener("visibilitychange", () => {
-    if (
-      typeof document !== "undefined" &&
-      document.visibilityState === "hidden" &&
-      _saveTimer
-    )
+    if (typeof document !== "undefined" && document.visibilityState === "hidden" && _saveTimer)
       save();
+  });
+}
+if (typeof document !== "undefined" && document.addEventListener) {
+  document.addEventListener("keydown", (event) => {
+    if (!modal) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeModal();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = Array.from(
+      document.querySelectorAll(
+        '.modal button:not([disabled]), .modal input:not([disabled]), .modal select:not([disabled]), .modal textarea:not([disabled]), .modal [tabindex]:not([tabindex="-1"])',
+      ),
+    );
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
   });
 }
 function exportSave() {
@@ -213,7 +440,7 @@ function exportSave() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `wnba-expansion-save-${S.year}.json`;
+  a.download = `${slug(S.saveName) || "wnba-expansion"}-${S.year}.json`;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -224,32 +451,86 @@ function importSave() {
   const raw = (document.getElementById("saveImport") || {}).value || "";
   if (!raw.trim()) return toast("Paste JSON into the import box first.");
   try {
-    const incoming = migrate(JSON.parse(raw));
-    if (!isValidSave(incoming))
-      throw new Error("Save is missing required fields.");
-    S = incoming;
-    tab = S.started ? "dashboard" : "setup";
-    toast("Save imported successfully.");
+    const incoming = normalizeSave(JSON.parse(raw));
+    if (!incoming) throw new Error("Save is missing required fields.");
+    pendingImport = incoming;
+    toast("Import validated. Review the preview before applying it.");
     render();
   } catch (error) {
     console.error(error);
     toast("Import failed: invalid or incomplete save JSON.");
   }
 }
+function confirmImport() {
+  if (!pendingImport) return;
+  recordUndo("save import");
+  resetFaBase();
+  S = pendingImport;
+  pendingImport = null;
+  tab = S.started ? "dashboard" : "setup";
+  save();
+  toast("Save imported successfully.");
+  render();
+  resumeOffseasonDraft();
+}
+function createSaveSlot() {
+  const name = readField("save-slot-name").trim();
+  if (!name) return toast("Enter a name for the new save slot.");
+  save();
+  activeSlotId = `${slug(name) || "franchise"}-${Date.now().toString(36)}`;
+  S.saveName = name;
+  lastUndo = null;
+  save();
+  toast(`Saved a copy as “${name}”.`);
+  render();
+}
+function loadSaveSlot(id) {
+  if (!id || id === activeSlotId) return;
+  save();
+  try {
+    const incoming = normalizeSave(JSON.parse(localStorage.getItem(slotStorageKey(id))));
+    if (!incoming) throw new Error("Invalid save slot");
+    activeSlotId = id;
+    localStorage.setItem(ACTIVE_SLOT_KEY, id);
+    resetFaBase();
+    S = incoming;
+    lastUndo = null;
+    tab = S.started ? "dashboard" : "setup";
+    render();
+    resumeOffseasonDraft();
+    toast(`Loaded “${S.saveName}”.`);
+  } catch (error) {
+    console.error(error);
+    toast("That save slot could not be loaded.");
+  }
+}
+function deleteSaveSlot(id) {
+  if (!id) return;
+  if (id === activeSlotId) return toast("Load another slot before deleting this one.");
+  if (!confirm("Delete this save slot? This cannot be undone.")) return;
+  localStorage.removeItem(slotStorageKey(id));
+  writeSaveIndex(readSaveIndex().filter((slot) => slot.id !== id));
+  toast("Save slot deleted.");
+  render();
+}
 function toast(msg) {
+  const host = document.getElementById("toast");
+  if (!host) return;
   const t = document.createElement("div");
   t.className = "toast";
   t.textContent = msg;
-  document.getElementById("toast").appendChild(t);
+  host.appendChild(t);
   setTimeout(() => t.remove(), 3500);
 }
 function root() {
   return document.getElementById("app");
 }
 function allLeaguePlayers() {
-  return S.teams.flatMap((t) =>
+  if (_leaguePlayerCache) return _leaguePlayerCache;
+  _leaguePlayerCache = S.teams.flatMap((t) =>
     t.players.map((p) => ({ ...p, teamName: t.name, teamObj: t })),
   );
+  return _leaguePlayerCache;
 }
 function userSalary() {
   return S.roster.reduce((a, p) => a + p.salary, 0);
@@ -267,24 +548,20 @@ let _compCache = new WeakMap();
 // false during simulation, where per-game injuries make caching across games wrong.
 let _powerCache = Object.create(null);
 let _powerCacheOn = false;
+let _teamMap = null;
+let _playerMap = null;
+let _leaguePlayerCache = null;
 function clearComputeCaches() {
   _compCache = new WeakMap();
   _powerCache = Object.create(null);
+  _teamMap = null;
+  _playerMap = null;
+  _leaguePlayerCache = null;
 }
 function composite(p) {
   const hit = _compCache.get(p);
   if (hit !== undefined) return hit;
-  const r = p.ratings;
-  const v = Math.round(
-    r.scoring * 0.19 +
-      r.shooting * 0.14 +
-      r.playmaking * 0.14 +
-      r.defense * 0.18 +
-      r.rebounding * 0.12 +
-      r.athleticism * 0.09 +
-      r.iq * 0.09 +
-      r.potential * 0.05,
-  );
+  const v = ENGINE.compositeRating(p, PLAYER_RATING_KEYS, BALANCE.compositeWeights);
   _compCache.set(p, v);
   return v;
 }
@@ -308,7 +585,7 @@ function portraitHtml(player, size) {
   const cls = "portrait" + (size ? " " + size : "");
   const escapedName = escapeHtml(player.name);
   const img = id
-    ? `<img src="https://a.espncdn.com/i/headshots/wnba/players/full/${id}.png" alt="${escapedName}" onerror="this.style.display='none'" loading="lazy">`
+    ? `<img src="https://a.espncdn.com/i/headshots/wnba/players/full/${id}.png" alt="${escapedName}" data-portrait-image loading="lazy">`
     : "";
   return `<div class="${cls}">${initials}${img}</div>`;
 }
@@ -335,16 +612,59 @@ function checkObjectives() {
     if (o.id === "future") o.done = S.picks.you >= 2;
   });
 }
+function rosterReadiness() {
+  const groups = {
+    G: S.roster.some((p) => p.pos.includes("G")),
+    F: S.roster.some((p) => p.pos.includes("F")),
+    C: S.roster.some((p) => p.pos.includes("C")),
+  };
+  const issues = [];
+  if (S.roster.length < DATA.rosterMin)
+    issues.push(`${DATA.rosterMin - S.roster.length} more player(s)`);
+  if (!groups.G || !groups.F || !groups.C)
+    issues.push(
+      `position coverage (${Object.entries(groups)
+        .filter(([, ready]) => !ready)
+        .map(([group]) => group)
+        .join(", ")})`,
+    );
+  if (userSalary() > DATA.cap) issues.push("cap compliance");
+  return { ready: issues.length === 0, issues };
+}
+function requireOpeningNightReady() {
+  if (
+    !S.offseason &&
+    S.season &&
+    Array.isArray(S.season.schedule) &&
+    S.season.schedule.some((game) => game.played)
+  )
+    return true;
+  const readiness = rosterReadiness();
+  if (readiness.ready) return true;
+  tab = "draft";
+  render();
+  toast(`Opening night needs ${readiness.issues.join(" and ")}.`);
+  return false;
+}
+function recordUndo(label) {
+  lastUndo = { label, state: clone(S) };
+}
+function undoLastMove() {
+  if (!lastUndo) return toast("There is no move to undo.");
+  const previous = lastUndo;
+  lastUndo = null;
+  S = normalizeSave(previous.state) || S;
+  toast(`${previous.label} undone.`);
+  render();
+}
 function captureFocus() {
   const f = document.activeElement;
   if (!f || f === document.body) return null;
   if (!["INPUT", "TEXTAREA", "SELECT"].includes(f.tagName)) return null;
   let sel = null;
   if (f.id) sel = "#" + CSS.escape(f.id);
-  else if (f.dataset && f.dataset.tradeQuery !== undefined)
-    sel = "[data-trade-query]";
-  else if (f.dataset && f.dataset.filter)
-    sel = `[data-filter="${f.dataset.filter}"]`;
+  else if (f.dataset && f.dataset.tradeQuery !== undefined) sel = "[data-trade-query]";
+  else if (f.dataset && f.dataset.filter) sel = `[data-filter="${f.dataset.filter}"]`;
   if (!sel) return null;
   return {
     selector: sel,
@@ -358,11 +678,12 @@ function restoreFocus(info) {
   if (!el || !el.focus) return;
   el.focus();
   try {
-    if (info.start != null && el.setSelectionRange)
+    if (info.start !== null && info.start !== undefined && el.setSelectionRange)
       el.setSelectionRange(info.start, info.end);
-  } catch (e) {}
+  } catch {}
 }
 function render() {
+  if (!root()) return;
   const focusInfo = captureFocus();
   // Caches are valid for the duration of a single paint only.
   clearComputeCaches();
@@ -371,24 +692,42 @@ function render() {
   checkObjectives();
   document.documentElement.style.setProperty("--user1", S.team.primary);
   document.documentElement.style.setProperty("--user2", S.team.secondary);
+  document.documentElement.style.setProperty("--userText", contrastText(S.team.primary));
   root().innerHTML = S.started ? shell() : setupPage();
   bind();
   restoreFocus(focusInfo);
+  if (modal) {
+    const closeButton = document.querySelector(".modal [data-close]");
+    if (closeButton) closeButton.focus();
+  }
   _powerCacheOn = false;
   // Persist off the hot path: a full JSON.stringify(S) + localStorage write on
   // every keystroke/tab click was the single biggest cost. Debounced instead.
   queueSave();
 }
+function renderView() {
+  const view = document.getElementById("view-content");
+  if (!view) return render();
+  const focusInfo = captureFocus();
+  clearComputeCaches();
+  _powerCacheOn = true;
+  ensureSeason();
+  checkObjectives();
+  view.innerHTML = content();
+  bind();
+  restoreFocus(focusInfo);
+  _powerCacheOn = false;
+  queueSave();
+}
 function shell() {
-  return `<div class="appShell"><aside class="side"><div class="brand"><div class="logo"></div><div><h1>${escapeHtml(S.team.city)} ${escapeHtml(S.team.nickname)}</h1><p>Expansion Front Office</p></div></div><nav class="nav">${navBtn("dashboard", "Dashboard")} ${navBtn("draft", "Expansion Draft")} ${navBtn("roster", "Roster")} ${navBtn("schedule", "Season")} ${navBtn("trades", "Trade Desk")} ${navBtn("waivers", "Waivers")} ${navBtn("coaching", "Coaching")} ${navBtn("league", "League")} ${navBtn("admin", "Admin")}</nav><div class="sideCard"><div class="mini">Front Office Score</div><div class="big">${frontOfficeScore()}</div><p>${frontOfficeNote()}</p><p class="mini">${frontOfficeDrivers()}</p></div></aside><main class="main">${topbar()}${content()}${modalHtml()}</main></div>`;
+  return `<div class="appShell"><aside class="side"><div class="brand"><div class="logo"></div><div><h1>${escapeHtml(S.team.city)} ${escapeHtml(S.team.nickname)}</h1><p>Expansion Front Office</p></div></div><nav class="nav" aria-label="Primary navigation">${navBtn("dashboard", "Dashboard")} ${navBtn("draft", "Expansion Draft")} ${navBtn("roster", "Roster")} ${navBtn("schedule", "Season")} ${navBtn("trades", "Trade Desk")} ${navBtn("waivers", "Waivers")} ${navBtn("coaching", "Coaching")} ${navBtn("league", "League")} ${navBtn("history", "History")} ${navBtn("admin", "Admin")}</nav><div class="sideCard"><div class="mini">Front Office Score</div><div class="big">${frontOfficeScore()}</div><p>${frontOfficeNote()}</p><p class="mini">${frontOfficeDrivers()}</p></div></aside><main class="main" id="main-content">${topbar()}<div id="view-content">${content()}</div>${modalHtml()}</main></div>`;
 }
 function navBtn(id, label) {
   return `<button data-tab="${id}" class="${tab === id ? "active" : ""}"><span>${label}</span><b>${navBadge(id)}</b></button>`;
 }
 function navBadge(id) {
   if (id === "draft") return `${S.roster.length}/${DATA.expansionPickLimit}`;
-  if (id === "schedule")
-    return `${seasonRecord(S.team.abbr).w}-${seasonRecord(S.team.abbr).l}`;
+  if (id === "schedule") return `${seasonRecord(S.team.abbr).w}-${seasonRecord(S.team.abbr).l}`;
   if (id === "trades") return S.picks.you;
   if (id === "waivers") return S.waived.length;
   if (id === "coaching" && S.coaching && S.coaching.pendingPress) return "!";
@@ -403,6 +742,7 @@ function topbar() {
     trades: "Trade Desk",
     waivers: "Waiver Wire",
     league: "League Overview",
+    history: "Franchise History",
     offseason: "Offseason",
     coaching: "Coaching",
     admin: "Admin · Custom Rookies",
@@ -423,32 +763,40 @@ function topbar() {
     (S.playoffs && S.playoffs.complete) ||
     !S.started ||
     !S.season;
+  const readiness = rosterReadiness();
   const playBtn = hidePlayBtn
     ? ""
-    : `<button class="btn secondary" data-action="simNext">Play Next Game →</button>`;
-  return `<div class="topbar"><div><h2>${title}</h2><p>${sub}</p></div><div class="actions">${playBtn}<button class="btn secondary" data-action="reset">New Save</button></div></div>`;
+    : readiness.ready
+      ? `<button class="btn secondary" data-action="simNext">Play Next Game →</button>`
+      : `<button class="btn secondary" data-tab="draft">Complete Roster · ${S.roster.length}/${DATA.rosterMin}</button>`;
+  const undoBtn = lastUndo
+    ? `<button class="btn ghost" data-action="undo">Undo ${escapeHtml(lastUndo.label)}</button>`
+    : "";
+  return `<div class="topbar"><div><h2>${title}</h2><p>${sub}</p></div><div class="actions">${playBtn}${undoBtn}<button class="btn secondary" data-action="reset">New Save</button></div></div>`;
 }
 function content() {
   // Offseason takes over only the Schedule tab so the user can still navigate
   // to Roster, Trades, Coaching, etc. while in the aging / rookie draft flow.
   if (S.offseason && tab === "schedule") return offseasonView();
   if (S.offseason && tab === "offseason") return offseasonView();
-  if (tab === "awards" && S.pendingAwards) return awardsView();
+  if (tab === "awards") return S.pendingAwards ? awardsView() : schedulePage();
   if (S.postGame && tab === "schedule") return postGameView();
   if (S.gameDay && tab === "schedule") return gameDayView();
-  if (S.playoffs && S.playoffs.active && tab === "schedule")
-    return playoffsView();
-  return {
-    dashboard: dashboard(),
-    draft: draft(),
-    roster: roster(),
-    schedule: schedulePage(),
-    trades: trades(),
-    waivers: waivers(),
-    league: league(),
-    coaching: coachingView(),
-    admin: adminView(),
-  }[tab];
+  if (S.playoffs && S.playoffs.active && tab === "schedule") return playoffsView();
+  return (
+    {
+      dashboard: dashboard(),
+      draft: draft(),
+      roster: roster(),
+      schedule: schedulePage(),
+      trades: trades(),
+      waivers: waivers(),
+      league: league(),
+      history: historyView(),
+      coaching: coachingView(),
+      admin: adminView(),
+    }[tab] || dashboard()
+  );
 }
 function kpis() {
   const sal = userSalary();
@@ -460,7 +808,7 @@ function kpis() {
 function dashboard() {
   const best = bestPlayer();
   const weak = weakestPositionGroup();
-  return `${kpis()}<div class="layout2"><section class="card"><div class="sectionTitle"><h3>Owner Briefing</h3><span>Visible franchise pulse and next actions</span></div><div class="cardPad"><div class="layout3"><div><h3>${escapeHtml(S.team.city)} ${escapeHtml(S.team.nickname)}</h3><p class="muted">${escapeHtml(S.team.arena)}. You are building a one-season expansion roster under a simplified cap while protecting future optionality.</p><button class="btn" data-tab="draft">Open Draft Room</button></div><div class="impact">${impactBars()}</div><div class="log"><div class="logItem"><b>Next opponent</b><p class="muted">${escapeHtml(nextOpponentSummary())}</p></div><div class="logItem"><b>Best player</b><p class="muted">${best ? escapeHtml(best.name) + " · " + escapeHtml(visibleGrade(best)) : "No roster yet."}</p></div><div class="logItem"><b>Weakest group</b><p class="muted">${escapeHtml(weak.pos)} depth · ${weak.count}</p></div><div class="logItem"><b>Recommended next move</b><p class="muted">${escapeHtml(recommendation())}</p></div></div></div></div></section><section class="card"><div class="sectionTitle"><h3>Front Office Feed</h3><span>${S.log.length} events</span></div><div class="cardPad log">${
+  return `${kpis()}${nextGameBrief()}<div class="layout2" style="margin-top:18px"><section class="card"><div class="sectionTitle"><h3>Owner Briefing</h3><span>Visible franchise pulse and next actions</span></div><div class="cardPad"><div class="layout3"><div><h3>${escapeHtml(S.team.city)} ${escapeHtml(S.team.nickname)}</h3><p class="muted">${escapeHtml(S.team.arena)}. You are building a one-season expansion roster under a simplified cap while protecting future optionality.</p><button class="btn" data-tab="draft">Open Draft Room</button></div><div class="impact">${impactBars()}</div><div class="log"><div class="logItem"><b>Next opponent</b><p class="muted">${escapeHtml(nextOpponentSummary())}</p></div><div class="logItem"><b>Best player</b><p class="muted">${best ? escapeHtml(best.name) + " · " + escapeHtml(visibleGrade(best)) : "No roster yet."}</p></div><div class="logItem"><b>Weakest group</b><p class="muted">${escapeHtml(weak.pos)} depth · ${weak.count}</p></div><div class="logItem"><b>Recommended next move</b><p class="muted">${escapeHtml(recommendation())}</p></div></div></div></div></section><section class="card"><div class="sectionTitle"><h3>Front Office Feed</h3><span>${S.log.length} events</span></div><div class="cardPad log">${
     S.log
       .slice(0, 8)
       .map(
@@ -478,14 +826,7 @@ function dashboard() {
 }
 function impactBars() {
   const r = teamRatings();
-  return [
-    "Scoring",
-    "Shooting",
-    "Playmaking",
-    "Defense",
-    "Rebounding",
-    "Upside",
-  ]
+  return ["Scoring", "Shooting", "Playmaking", "Defense", "Rebounding", "Upside"]
     .map(
       (k) =>
         `<div class="impactRow"><b>${k}</b><div class="bar"><i style="width:${r[k]}%"></i></div><span>${r[k]}</span></div>`,
@@ -528,14 +869,14 @@ function frontOfficeDrivers() {
   drivers.push(userSalary() <= DATA.cap ? "Cap compliant" : "Over cap");
   const completed = S.objectives.filter((o) => o.done).length;
   drivers.push(`${completed} objective${completed === 1 ? "" : "s"} done`);
-  if (S.picks.you > 2) drivers.push(`${S.picks.you - 2} extra draft pick${S.picks.you - 2 === 1 ? "" : "s"}`);
+  if (S.picks.you > 2)
+    drivers.push(`${S.picks.you - 2} extra draft pick${S.picks.you - 2 === 1 ? "" : "s"}`);
   drivers.push(`Upside ${Math.round(avg(S.roster.map((p) => p.ratings.potential)) || 0)}`);
   return drivers.join(" · ");
 }
 function rosterBalance() {
   const r = teamRatings();
-  if (!S.roster.length)
-    return { identity: "None", note: "Draft players to establish a style" };
+  if (!S.roster.length) return { identity: "None", note: "Draft players to establish a style" };
   const pairs = Object.entries(r).sort((a, b) => b[1] - a[1]);
   const last = pairs[pairs.length - 1];
   return {
@@ -557,12 +898,8 @@ function leaguePressure() {
     .map((t) => {
       const need = teamNeed(t);
       const mood =
-        t.status === "contender"
-          ? "buying"
-          : t.status === "rebuilding"
-            ? "selling"
-            : "selective";
-      return `<div class="logItem"><b><span class="teamBadge" style="background:${t.primary}">${t.id}</span>${t.name}</b><p class="muted">Market posture: ${mood}. Biggest need: ${need}. Cap used: ${shortMoney(teamSalary(t))}.</p></div>`;
+        t.status === "contender" ? "buying" : t.status === "rebuilding" ? "selling" : "selective";
+      return `<div class="logItem"><b><span class="teamBadge" style="${badgeStyle(t.primary)}">${t.id}</span>${t.name}</b><p class="muted">Market posture: ${mood}. Biggest need: ${need}. Cap used: ${shortMoney(teamSalary(t))}.</p></div>`;
     })
     .join("");
 }
@@ -587,16 +924,14 @@ function draft() {
   const archOpts =
     `<option value="ALL">All archetypes</option>` +
     ARCHETYPE_OPTIONS.map(
-      (a) =>
-        `<option value="${a}" ${draftFilters.arch === a ? "selected" : ""}>${a}</option>`,
+      (a) => `<option value="${a}" ${draftFilters.arch === a ? "selected" : ""}>${a}</option>`,
     ).join("");
   const strengthOpts =
     `<option value="">Any strength</option>` +
     STRENGTH_TAGS.map(
-      (s) =>
-        `<option value="${s}" ${draftFilters.strength === s ? "selected" : ""}>${s}</option>`,
+      (s) => `<option value="${s}" ${draftFilters.strength === s ? "selected" : ""}>${s}</option>`,
     ).join("");
-  return `${kpis()}<section class="card"><div class="sectionTitle"><h3>Available Expansion Pool</h3><span>protected stars are visible but locked unless acquired by trade</span></div><div class="filters"><input data-filter="q" placeholder="Search name/team/scouting" value="${draftFilters.q}"><select data-filter="strength">${strengthOpts}</select><select data-filter="pos"><option>ALL</option>${["G", "F", "C"].map((x) => `<option ${draftFilters.pos === x ? "selected" : ""}>${x}</option>`).join("")}</select><select data-filter="team"><option>ALL</option>${S.teams.map((t) => `<option value="${t.id}" ${draftFilters.team === t.id ? "selected" : ""}>${t.name}</option>`).join("")}</select><select data-filter="arch">${archOpts}</select><select data-filter="risk"><option value="ALL">All risk profiles</option><option ${draftFilters.risk === "upside" ? "selected" : ""} value="upside">Upside</option><option ${draftFilters.risk === "safe" ? "selected" : ""} value="safe">Safe veterans</option><option ${draftFilters.risk === "cheap" ? "selected" : ""} value="cheap">Cheap contracts</option></select><button class="btn secondary" style="height:42px;white-space:nowrap" data-action="resetDraftFilters">Reset filters</button></div><div class="cardPad callout"><strong>Draft tip:</strong> Use the filters to target upside, cheap veterans, or positional fit. Reset filters anytime to reopen the full expansion pool.</div><div class="board">${pool.map(playerDraftCard).join("") || '<div class="empty">No players match those filters. Clear filters or broaden your search to see more expansion prospects.</div>'}</div></section>`;
+  return `${kpis()}<section class="card"><div class="sectionTitle"><h3>Available Expansion Pool</h3><span>protected stars are visible but locked unless acquired by trade</span></div><div class="filters"><input data-filter="q" placeholder="Search name/team/scouting" value="${escapeAttr(draftFilters.q)}"><select data-filter="strength">${strengthOpts}</select><select data-filter="pos"><option>ALL</option>${["G", "F", "C"].map((x) => `<option ${draftFilters.pos === x ? "selected" : ""}>${x}</option>`).join("")}</select><select data-filter="team"><option>ALL</option>${S.teams.map((t) => `<option value="${t.id}" ${draftFilters.team === t.id ? "selected" : ""}>${t.name}</option>`).join("")}</select><select data-filter="arch">${archOpts}</select><select data-filter="risk"><option value="ALL">All risk profiles</option><option ${draftFilters.risk === "upside" ? "selected" : ""} value="upside">Upside</option><option ${draftFilters.risk === "safe" ? "selected" : ""} value="safe">Safe veterans</option><option ${draftFilters.risk === "cheap" ? "selected" : ""} value="cheap">Cheap contracts</option></select><button class="btn secondary" style="height:42px;white-space:nowrap" data-action="resetDraftFilters">Reset filters</button></div><div class="cardPad callout"><strong>Draft tip:</strong> Use the filters to target upside, cheap veterans, or positional fit. Reset filters anytime to reopen the full expansion pool.</div><div class="board">${pool.map(playerDraftCard).join("") || '<div class="empty">No players match those filters. Clear filters or broaden your search to see more expansion prospects.</div>'}</div></section>`;
 }
 function filteredDraftPool() {
   return allLeaguePlayers()
@@ -604,40 +939,35 @@ function filteredDraftPool() {
       const q = draftFilters.q.toLowerCase();
       if (
         q &&
-        !(p.name + p.teamName + p.scouting + p.strengths + p.weaknesses)
-          .toLowerCase()
-          .includes(q)
+        !(p.name + p.teamName + p.scouting + p.strengths + p.weaknesses).toLowerCase().includes(q)
       )
         return false;
-      if (draftFilters.pos !== "ALL" && !p.pos.includes(draftFilters.pos))
-        return false;
-      if (draftFilters.team !== "ALL" && p.team !== draftFilters.team)
-        return false;
-      if (draftFilters.risk === "upside" && p.ratings.potential < 80)
-        return false;
-      if (draftFilters.risk === "safe" && !(p.years <= 1 && p.ratings.iq > 78))
-        return false;
+      if (draftFilters.pos !== "ALL" && !p.pos.includes(draftFilters.pos)) return false;
+      if (draftFilters.team !== "ALL" && p.team !== draftFilters.team) return false;
+      if (draftFilters.risk === "upside" && p.ratings.potential < 80) return false;
+      if (draftFilters.risk === "safe" && !(p.years <= 1 && p.ratings.iq > 78)) return false;
       if (draftFilters.risk === "cheap" && p.salary > 500000) return false;
       const s = draftFilters.strength.toLowerCase();
       if (s && !(p.strengths || "").toLowerCase().includes(s)) return false;
-      if (draftFilters.arch !== "ALL" && p.archetype !== draftFilters.arch)
-        return false;
+      if (draftFilters.arch !== "ALL" && p.archetype !== draftFilters.arch) return false;
       return true;
     })
     .sort((a, b) => a.protected - b.protected || tradeValue(b) - tradeValue(a));
 }
 function playerDraftCard(p) {
+  const draftClosed = S.phase !== "Expansion Build";
   const disabled =
+    draftClosed ||
     p.protected ||
     S.roster.length >= DATA.expansionPickLimit ||
     userSalary() + p.salary > DATA.cap;
-  return `<div class="playerCard">${portraitHtml(p)}<div><div><span class="playerName">${escapeHtml(p.name)}</span> <span class="pill">${escapeHtml(p.pos)}</span> <span class="pill" style="background:${p.teamObj.primary};color:white">${escapeHtml(p.team)}</span> ${p.protected ? '<span class="pill bad">Protected</span>' : ""}</div><div class="scout">${escapeHtml(p.scouting)}</div><div class="tags"><span class="tag">${visibleGrade(p)}</span><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${p.years} yr</span><span class="tag">${escapeHtml(p.archetype)}</span><span class="tag">Strength: ${escapeHtml(p.strengths.split(",")[0])}</span><span class="tag">Weakness: ${escapeHtml(p.weaknesses.split(",")[0])}</span></div></div><div class="actions"><button class="btn secondary" data-view="${p.id}">Scout</button><button class="btn ${disabled ? "secondary" : ""}" ${disabled ? "disabled" : ""} data-draft="${p.id}">${p.protected ? "Locked" : userSalary() + p.salary > DATA.cap ? "No Cap" : "Draft"}</button></div></div>`;
+  return `<div class="playerCard">${portraitHtml(p)}<div><div><span class="playerName">${escapeHtml(p.name)}</span> <span class="pill">${escapeHtml(p.pos)}</span> <span class="pill" style="${badgeStyle(p.teamObj.primary)}">${escapeHtml(p.team)}</span> ${p.protected ? '<span class="pill bad">Protected</span>' : ""}</div><div class="scout">${escapeHtml(p.scouting)}</div><div class="tags"><span class="tag">${visibleGrade(p)}</span><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${p.years} yr</span><span class="tag">${escapeHtml(p.archetype)}</span><span class="tag">Strength: ${escapeHtml(firstTag(p.strengths))}</span><span class="tag">Weakness: ${escapeHtml(firstTag(p.weaknesses))}</span></div></div><div class="actions"><button class="btn secondary" data-view="${escapeAttr(p.id)}">Scout</button><button class="btn ${disabled ? "secondary" : ""}" ${disabled ? "disabled" : ""} data-draft="${escapeAttr(p.id)}">${draftClosed ? "Draft Closed" : p.protected ? "Locked" : userSalary() + p.salary > DATA.cap ? "No Cap" : "Draft"}</button></div></div>`;
 }
 function roster() {
   return `${kpis()}<div class="layout2"><section class="card"><div class="sectionTitle"><h3>Cap Sheet</h3><span>${money(userSalary())} / ${money(DATA.cap)}</span></div>${rosterTable(S.roster)}</section><section class="card"><div class="sectionTitle"><h3>Roster Tools</h3><span>rotation control</span></div><div class="cardPad"><div class="impact">${impactBars()}</div><hr style="border:0;border-top:1px solid var(--line);margin:18px 0"><h3>Position Balance</h3>${positionBalance()}<h3>Recommended Next Move</h3><p class="muted">${recommendation()}</p></div></section></div>`;
 }
 function rosterTable(players) {
-  return `<table class="table"><thead><tr><th>Player</th><th>Pos</th><th>Role</th><th>Salary</th><th>Contract</th><th></th></tr></thead><tbody>${players.map((p) => `<tr><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div><div class="playerName">${escapeHtml(p.name)}</div><div class="mini">${escapeHtml(p.archetype)} · ${escapeHtml(p.strengths.split(",")[0])} · ${escapeHtml(p.weaknesses.split(",")[0])}</div></div></div></td><td>${escapeHtml(p.pos)}</td><td><span class="pill">${visibleGrade(p)}</span></td><td>${shortMoney(p.salary)}</td><td>${p.years} yr</td><td><button class="btn secondary" data-view="${p.id}">Scout</button> ${S.roster.find((x) => x.id === p.id) ? `<button class="btn danger" data-waive="${p.id}">Waive</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="6"><div class="empty">No players yet.</div></td></tr>`}</tbody></table>`;
+  return `<table class="table"><thead><tr><th>Player</th><th>Pos</th><th>Role</th><th>Salary</th><th>Contract</th><th></th></tr></thead><tbody>${players.map((p) => `<tr><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div><div class="playerName">${escapeHtml(p.name)}</div><div class="mini">${escapeHtml(p.archetype)} · ${escapeHtml(firstTag(p.strengths))} · ${escapeHtml(firstTag(p.weaknesses))}</div></div></div></td><td>${escapeHtml(p.pos)}</td><td><span class="pill">${visibleGrade(p)}</span></td><td>${shortMoney(p.salary)}</td><td>${p.years} yr</td><td><button class="btn secondary" data-view="${escapeAttr(p.id)}">Scout</button> ${S.roster.find((x) => x.id === p.id) ? `<button class="btn danger" data-waive="${escapeAttr(p.id)}">Waive</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="6"><div class="empty">No players yet.</div></td></tr>`}</tbody></table>`;
 }
 function positionBalance() {
   return ["G", "F", "C"]
@@ -658,10 +988,7 @@ function recommendation() {
 }
 function bestPlayer() {
   if (!S.roster.length) return null;
-  return S.roster.reduce((best, p) =>
-    composite(p) > composite(best) ? p : best,
-    S.roster[0],
-  );
+  return S.roster.reduce((best, p) => (composite(p) > composite(best) ? p : best), S.roster[0]);
 }
 function weakestPositionGroup() {
   const groups = ["G", "F", "C"].map((pos) => ({
@@ -681,6 +1008,7 @@ function nextOpponentSummary() {
   return `${opponent} ${isHome ? "at home" : "on the road"} in Week ${g.week}. Opponent looks light on ${need} depth.`;
 }
 function trades() {
+  if (S.teams.length && !S.teams.some((team) => team.id === trade.team)) trade.team = S.teams[0].id;
   const other = S.teams.find((t) => t.id === trade.team) || S.teams[0];
   const evaln = evaluateTrade(other);
   const q = (trade.query || "").toLowerCase();
@@ -692,34 +1020,29 @@ function trades() {
     (p.pos || "").toLowerCase().includes(q);
   const userList = S.roster.filter(matches);
   const otherList = other.players.filter(matches);
-  const partnerNeedLabel = {
-    G: "guards",
-    F: "forwards",
-    C: "centers",
-  }[teamNeed(other)] || "players";
-  return `${kpis()}<section class="card"><div class="sectionTitle"><h3>Trade Machine</h3><span>salary, value, team need, protected-player logic</span></div><div class="cardPad"><div class="layout2"><div class="field"><label>Trade partner</label><select data-trade-team>${S.teams.map((t) => `<option value="${t.id}" ${trade.team === t.id ? "selected" : ""}>${t.name} · ${t.status}</option>`).join("")}</select><div class="mini">Partner need: ${partnerNeedLabel}. Protected players are expensive; prioritize fit and future value.</div></div><div class="field"><label>Filter players (name, strength, archetype, position)</label><input data-trade-query placeholder="e.g. shooting" value="${trade.query || ""}"></div></div><div class="tradeBox"><div class="tradePanel"><div class="sectionTitle"><h3>${escapeHtml(S.team.nickname)} sends</h3><span>${shortMoney(sumSelected(S.roster, trade.userGive))}</span></div><div class="tradeList">${userList.map((p) => checkRow(p, "userGive")).join("") || '<div class="empty">No roster players match.</div>'}</div><div class="cardPad"><label><input type="checkbox" data-pick="user" ${trade.userPick ? "checked" : ""}> Include your future 1st-round pick</label></div></div><div class="tradePanel"><div class="sectionTitle"><h3>${other.name} sends</h3><span>${shortMoney(sumSelected(other.players, trade.otherGive))}</span></div><div class="tradeList">${otherList.map((p) => checkRow(p, "otherGive")).join("") || '<div class="empty">No partner players match.</div>'}</div><div class="cardPad"><label><input type="checkbox" data-pick="other" ${trade.otherPick ? "checked" : ""}> Request their future 2nd-round pick</label></div></div></div><div class="tradeSummary"><div class="logItem"><b>Trade Verdict: <span class="pill ${evaln.ok ? (evaln.label === "Strong Offer" ? "good" : evaln.label === "Good Offer" ? "info" : evaln.label === "Close Offer" ? "warn" : "good") : "warn"}">${evaln.label}</span></b><p class="muted">${evaln.reason}</p><div class="meter"><span>Your outgoing value</span><div class="bar"><i style="width:${Math.min(100, evaln.userValue / 20)}%"></i></div><b>${evaln.userValue}</b></div><div class="meter"><span>Partner outgoing value</span><div class="bar"><i style="width:${Math.min(100, evaln.otherValue / 20)}%"></i></div><b>${evaln.otherValue}</b></div></div>${evaln.advice && evaln.advice.length ? `<div class="tradeAdvice"><h4>Why this verdict?</h4><ul>${evaln.advice.map((item) => `<li>${item}</li>`).join("")}</ul></div>` : ""}</div><div class="actions"><button class="btn" data-action="submitTrade" ${evaln.ok ? "" : "disabled"}>Submit Trade</button><button class="btn secondary" data-action="clearTrade">Clear Selections</button></div></div></section>`;
+  const partnerNeedLabel =
+    {
+      G: "guards",
+      F: "forwards",
+      C: "centers",
+    }[teamNeed(other)] || "players";
+  return `${kpis()}<section class="card"><div class="sectionTitle"><h3>Trade Machine</h3><span>salary, value, team need, protected-player logic</span></div><div class="cardPad"><div class="layout2"><div class="field"><label>Trade partner</label><select data-trade-team>${S.teams.map((t) => `<option value="${t.id}" ${trade.team === t.id ? "selected" : ""}>${t.name} · ${t.status}</option>`).join("")}</select><div class="mini">Partner need: ${partnerNeedLabel}. Protected players are expensive; prioritize fit and future value.</div></div><div class="field"><label>Filter players (name, strength, archetype, position)</label><input data-trade-query placeholder="e.g. shooting" value="${escapeAttr(trade.query || "")}"></div></div><div class="tradeBox"><div class="tradePanel"><div class="sectionTitle"><h3>${escapeHtml(S.team.nickname)} sends</h3><span>${shortMoney(sumSelected(S.roster, trade.userGive))}</span></div><div class="tradeList">${userList.map((p) => checkRow(p, "userGive")).join("") || '<div class="empty">No roster players match.</div>'}</div><div class="cardPad"><label><input type="checkbox" data-pick="user" ${trade.userPick ? "checked" : ""} ${S.picks.you > 0 ? "" : "disabled"}> Include your future 1st-round pick (${S.picks.you} available)</label></div></div><div class="tradePanel"><div class="sectionTitle"><h3>${escapeHtml(other.name)} sends</h3><span>${shortMoney(sumSelected(other.players, trade.otherGive))}</span></div><div class="tradeList">${otherList.map((p) => checkRow(p, "otherGive")).join("") || '<div class="empty">No partner players match.</div>'}</div><div class="cardPad"><label><input type="checkbox" data-pick="other" ${trade.otherPick ? "checked" : ""} ${S.picks.league > 0 ? "" : "disabled"}> Request their future 2nd-round pick (${S.picks.league} available)</label></div></div></div><div class="tradeSummary"><div class="logItem"><b>Trade Verdict: <span class="pill ${evaln.ok ? (evaln.label === "Strong Offer" ? "good" : evaln.label === "Good Offer" ? "info" : evaln.label === "Close Offer" ? "warn" : "good") : "warn"}">${evaln.label}</span></b><p class="muted">${evaln.reason}</p><div class="meter"><span>Your outgoing value</span><div class="bar"><i style="width:${Math.min(100, evaln.userValue / 20)}%"></i></div><b>${evaln.userValue}</b></div><div class="meter"><span>Partner outgoing value</span><div class="bar"><i style="width:${Math.min(100, evaln.otherValue / 20)}%"></i></div><b>${evaln.otherValue}</b></div></div>${evaln.advice && evaln.advice.length ? `<div class="tradeAdvice"><h4>Why this verdict?</h4><ul>${evaln.advice.map((item) => `<li>${item}</li>`).join("")}</ul></div>` : ""}</div><div class="actions"><button class="btn" data-action="submitTrade" ${evaln.ok ? "" : "disabled"}>Submit Trade</button><button class="btn secondary" data-action="clearTrade">Clear Selections</button></div></div></section>`;
 }
 function checkRow(p, side) {
   const checked = trade[side].includes(p.id);
-  return `<label class="checkRow"><input type="checkbox" data-trade-side="${side}" value="${p.id}" ${checked ? "checked" : ""}>${portraitHtml(p, "sm")}<div><b>${escapeHtml(p.name)}</b> <span class="pill">${escapeHtml(p.pos)}</span> ${p.protected ? '<span class="pill bad">protected cost</span>' : ""}<div class="mini">${escapeHtml(visibleGrade(p))} · ${shortMoney(p.salary)} · ${escapeHtml(p.scouting.slice(0, 76))}...</div></div></label>`;
+  return `<label class="checkRow"><input type="checkbox" data-trade-side="${side}" value="${escapeAttr(p.id)}" ${checked ? "checked" : ""}>${portraitHtml(p, "sm")}<div><b>${escapeHtml(p.name)}</b> <span class="pill">${escapeHtml(p.pos)}</span> ${p.protected ? '<span class="pill bad">protected cost</span>' : ""}<div class="mini">${escapeHtml(visibleGrade(p))} · ${shortMoney(p.salary)} · ${escapeHtml(String(p.scouting || "").slice(0, 76))}...</div></div></label>`;
 }
 function sumSelected(players, ids) {
-  return players
-    .filter((p) => ids.includes(p.id))
-    .reduce((a, p) => a + p.salary, 0);
+  return players.filter((p) => ids.includes(p.id)).reduce((a, p) => a + p.salary, 0);
 }
 function selectedValue(players, ids) {
-  return players
-    .filter((p) => ids.includes(p.id))
-    .reduce((a, p) => a + tradeValue(p), 0);
+  return players.filter((p) => ids.includes(p.id)).reduce((a, p) => a + tradeValue(p), 0);
 }
 function evaluateTrade(other) {
   const uPlayers = S.roster.filter((p) => trade.userGive.includes(p.id));
   const oPlayers = other.players.filter((p) => trade.otherGive.includes(p.id));
-  let userValue =
-    selectedValue(S.roster, trade.userGive) + (trade.userPick ? 420 : 0);
-  let otherValue =
-    selectedValue(other.players, trade.otherGive) + (trade.otherPick ? 160 : 0);
+  let userValue = selectedValue(S.roster, trade.userGive) + (trade.userPick ? 420 : 0);
+  let otherValue = selectedValue(other.players, trade.otherGive) + (trade.otherPick ? 160 : 0);
   const salaryIn = sumSelected(other.players, trade.otherGive),
     salaryOut = sumSelected(S.roster, trade.userGive);
   const futureSalary = userSalary() - salaryOut + salaryIn;
@@ -739,6 +1062,16 @@ function evaluateTrade(other) {
       advice.push("Ask for a player or pick from your trade partner.");
     }
   }
+  if (trade.userPick && S.picks.you < 1) {
+    ok = false;
+    reasons.push("You do not have a future pick available to trade.");
+    advice.push("Remove the pick from your side of the offer.");
+  }
+  if (trade.otherPick && S.picks.league < 1) {
+    ok = false;
+    reasons.push("The partner has no available pick to send.");
+    advice.push("Remove the requested pick from the package.");
+  }
   if (futureSalary > DATA.cap) {
     ok = false;
     reasons.push("Salary structure fails to fit the cap.");
@@ -750,15 +1083,17 @@ function evaluateTrade(other) {
     advice.push("Trade fewer players or a single player to stay within roster limits.");
   }
   const protectedCount = oPlayers.filter((p) => p.protected).length;
-  if (protectedCount && userValue < otherValue * 1.25) {
+  if (protectedCount && userValue < otherValue * BALANCE.trade.protectedRatio) {
     ok = false;
-    reasons.push("Protected players are core assets; this package needs a stronger overpay or future pick.");
-    advice.push("Protected talent usually requires extra value or a pick to land." );
+    reasons.push(
+      "Protected players are core assets; this package needs a stronger overpay or future pick.",
+    );
+    advice.push("Protected talent usually requires extra value or a pick to land.");
   }
   const partnerNeed = teamNeed(other);
   if (uPlayers.some((p) => p.pos.includes(partnerNeed))) userValue += 120;
   const ratio = userValue / (otherValue || 1);
-  if (hasUserAssets && hasOtherAssets && ratio < 0.92) {
+  if (hasUserAssets && hasOtherAssets && ratio < BALANCE.trade.minimumRatio) {
     ok = false;
     reasons.push("This offer is under market value.");
     advice.push("Raise the offer by adding another player, future pick, or fit asset.");
@@ -768,26 +1103,27 @@ function evaluateTrade(other) {
       ok: false,
       label: "Rejected",
       reason: reasons.join(" "),
-      advice: advice.length ? advice : ["Review the package and adjust the assets."] ,
+      advice: advice.length ? advice : ["Review the package and adjust the assets."],
       userValue,
       otherValue,
     };
   let label = "Fair Trade";
   let reason = `This package should be attractive to ${other.name}.`;
-  if (ratio >= 1.15) {
+  if (ratio >= BALANCE.trade.strongRatio) {
     label = "Strong Offer";
     reason = `This looks like a strong proposal for ${other.name}.`;
     advice.push("This should be attractive to the partner and is worth submitting.");
-  } else if (ratio >= 1.0) {
+  } else if (ratio >= BALANCE.trade.goodRatio) {
     label = "Good Offer";
     reason = `This is a clean, market-value trade that helps ${other.name}'s ${partnerNeed} depth.`;
     advice.push("Strong match; the partner's need is aligned with this package.");
-  } else if (ratio >= 0.92) {
+  } else if (ratio >= BALANCE.trade.minimumRatio) {
     label = "Close Offer";
     reason = `This is close to a fair deal; a small sweetener could make it irresistible.`;
     advice.push("A small extra asset or pick will likely move this deal through.");
   }
-  if (!advice.length) advice.push("This offer checks the main boxes and is worth next-step review.");
+  if (!advice.length)
+    advice.push("This offer checks the main boxes and is worth next-step review.");
   return {
     ok: true,
     label,
@@ -808,123 +1144,132 @@ function teamNeed(t) {
 }
 function waivers() {
   const pool = waiverPool();
-  return `${kpis()}<div class="layout2"><section class="card"><div class="sectionTitle"><h3>Free Agents & Waivers</h3><span>cheap depth and regret board</span></div><div class="board">${pool.length
-    ? pool
-        .map(
-          (p) =>
-            `<div class="playerCard">${portraitHtml(p)}<div><span class="playerName">${escapeHtml(p.name)}</span> <span class="pill">${escapeHtml(p.pos)}</span><div class="scout">${escapeHtml(p.scouting)}</div><div class="tags"><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${visibleGrade(p)}</span><span class="tag">${escapeHtml(p.strengths.split(",")[0])}</span></div></div><button class="btn" data-sign="${p.id}">${userSalary() + p.salary > DATA.cap ? "No Cap" : "Sign"}</button></div>`,
-        )
-        .join("")
-    : '<div class="empty">No available free agents right now. Check back after roster moves or widen your criteria.</div>'}</div></section><section class="card"><div class="sectionTitle"><h3>Your Waived Players</h3><span>${S.waived.length}</span></div><div class="board">${S.waived.map((p) => `<div class="playerCard">${portraitHtml(p, "sm")}<div><b>${escapeHtml(p.name)}</b><div class="mini">${escapeHtml(p.pos)} · ${shortMoney(p.salary)}</div></div><button class="btn secondary" data-sign="${p.id}">Re-sign</button></div>`).join("") || '<div class="empty">No waived players yet. Waive a player to open cap space or reshape your roster.</div>'}</div><div class="cardPad callout"><div class="actions" style="justify-content:flex-start;gap:10px"><button class="btn secondary" data-tab="roster">Review roster</button><button class="btn secondary" data-tab="draft">Browse draft pool</button></div><p class="muted" style="margin-top:12px">Use waivers to patch holes or re-sign waived talent for familiarity. A quick depth move can keep your roster flexible.</p></div></section></div>`;
+  return `${kpis()}<div class="layout2"><section class="card"><div class="sectionTitle"><h3>Free Agents & Waivers</h3><span>cheap depth and regret board</span></div><div class="board">${
+    pool.length
+      ? pool
+          .map(
+            (p) =>
+              `<div class="playerCard">${portraitHtml(p)}<div><span class="playerName">${escapeHtml(p.name)}</span> <span class="pill">${escapeHtml(p.pos)}</span><div class="scout">${escapeHtml(p.scouting)}</div><div class="tags"><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${visibleGrade(p)}</span><span class="tag">${escapeHtml(firstTag(p.strengths))}</span></div></div><button class="btn" data-sign="${escapeAttr(p.id)}" ${userSalary() + p.salary > DATA.cap ? "disabled" : ""}>${userSalary() + p.salary > DATA.cap ? "No Cap" : "Sign"}</button></div>`,
+          )
+          .join("")
+      : '<div class="empty">No available free agents right now. Check back after roster moves or widen your criteria.</div>'
+  }</div></section><section class="card"><div class="sectionTitle"><h3>Your Waived Players</h3><span>${S.waived.length}</span></div><div class="board">${S.waived.map((p) => `<div class="playerCard">${portraitHtml(p, "sm")}<div><b>${escapeHtml(p.name)}</b><div class="mini">${escapeHtml(p.pos)} · ${shortMoney(p.salary)}</div></div><button class="btn secondary" data-sign="${escapeAttr(p.id)}">Re-sign</button></div>`).join("") || '<div class="empty">No waived players yet. Waive a player to open cap space or reshape your roster.</div>'}</div><div class="cardPad callout"><div class="actions" style="justify-content:flex-start;gap:10px"><button class="btn secondary" data-tab="roster">Review roster</button><button class="btn secondary" data-tab="draft">Browse draft pool</button></div><p class="muted" style="margin-top:12px">Use waivers to patch holes or re-sign waived talent for familiarity. A quick depth move can keep your roster flexible.</p></div></section></div>`;
 }
 let _faBase = null;
 function waiverPool() {
   if (!_faBase)
     _faBase = [
-    p(
-      "Morgan Tuck",
-      "F",
-      "FA",
-      290000,
-      1,
-      "Veteran practice-culture forward who can help young frontcourt players learn the league.",
-      "IQ, leadership, positional defense",
-      "Limited athletic ceiling",
-      false,
-      50,
-      46,
-      52,
-      58,
-      56,
-      35,
-      82,
-      45,
-      "veteran",
-    ),
-    p(
-      "Destiny Slocum",
-      "G",
-      "FA",
-      300000,
-      1,
-      "Depth guard with handle and scoring confidence.",
-      "Handle, pull-up confidence, pace",
-      "Efficiency, defense",
-      false,
-      58,
-      60,
-      59,
-      48,
-      34,
-      67,
-      61,
-      58,
-      "depth",
-    ),
-    p(
-      "Charli Collier",
-      "C",
-      "FA",
-      320000,
-      1,
-      "Former high pick with size and rebound upside as a buy-low big.",
-      "Size, boards, touch flashes",
-      "Speed, consistency",
-      false,
-      55,
-      30,
-      38,
-      54,
-      70,
-      42,
-      55,
-      61,
-      "big",
-    ),
-    p(
-      "Rae Burrell",
-      "G/F",
-      "FA",
-      310000,
-      1,
-      "Athletic wing flyer who can defend bench scorers.",
-      "Athleticism, wing size, transition",
-      "Shooting consistency, reads",
-      false,
-      56,
-      55,
-      44,
-      61,
-      47,
-      74,
-      54,
-      64,
-      "wing",
-    ),
-    p(
-      "Crystal Dangerfield",
-      "G",
-      "FA",
-      340000,
-      1,
-      "Small point guard who can stabilize second units.",
-      "Handle, passing, experience",
-      "Size, defense",
-      false,
-      58,
-      58,
-      70,
-      48,
-      32,
-      70,
-      77,
-      56,
-      "engine",
-    ),
-  ];
+      p(
+        "Morgan Tuck",
+        "F",
+        "FA",
+        290000,
+        1,
+        "Veteran practice-culture forward who can help young frontcourt players learn the league.",
+        "IQ, leadership, positional defense",
+        "Limited athletic ceiling",
+        false,
+        50,
+        46,
+        52,
+        58,
+        56,
+        35,
+        82,
+        45,
+        "veteran",
+      ),
+      p(
+        "Destiny Slocum",
+        "G",
+        "FA",
+        300000,
+        1,
+        "Depth guard with handle and scoring confidence.",
+        "Handle, pull-up confidence, pace",
+        "Efficiency, defense",
+        false,
+        58,
+        60,
+        59,
+        48,
+        34,
+        67,
+        61,
+        58,
+        "depth",
+      ),
+      p(
+        "Charli Collier",
+        "C",
+        "FA",
+        320000,
+        1,
+        "Former high pick with size and rebound upside as a buy-low big.",
+        "Size, boards, touch flashes",
+        "Speed, consistency",
+        false,
+        55,
+        30,
+        38,
+        54,
+        70,
+        42,
+        55,
+        61,
+        "big",
+      ),
+      p(
+        "Rae Burrell",
+        "G/F",
+        "FA",
+        310000,
+        1,
+        "Athletic wing flyer who can defend bench scorers.",
+        "Athleticism, wing size, transition",
+        "Shooting consistency, reads",
+        false,
+        56,
+        55,
+        44,
+        61,
+        47,
+        74,
+        54,
+        64,
+        "wing",
+      ),
+      p(
+        "Crystal Dangerfield",
+        "G",
+        "FA",
+        340000,
+        1,
+        "Small point guard who can stabilize second units.",
+        "Handle, passing, experience",
+        "Size, defense",
+        false,
+        58,
+        58,
+        70,
+        48,
+        32,
+        70,
+        77,
+        56,
+        "engine",
+      ),
+    ];
+  // A cached base free agent remains in _faBase after signing, so explicitly
+  // exclude every player already owned by the user or another team.
+  const owned = new Set([
+    ...S.roster.map((player) => player.id),
+    ...S.teams.flatMap((team) => team.players.map((player) => player.id)),
+  ]);
   // Dedupe by id in O(n) (a waived player can match a base FA id).
   const seen = new Set();
-  return _faBase.concat(S.waived).filter((v) => {
+  return _faBase.concat(S.waived, S.freeAgents || []).filter((v) => {
+    if (owned.has(v.id)) return false;
     if (seen.has(v.id)) return false;
     seen.add(v.id);
     return true;
@@ -934,7 +1279,7 @@ function league() {
   return `<div class="layout3">${S.teams
     .map(
       (t) =>
-        `<section class="card"><div class="sectionTitle"><h3><span class="teamBadge" style="background:${t.primary}">${t.id}</span>${t.name}</h3><span>${t.status}</span></div><div class="cardPad"><div class="meter"><span>Roster</span><div class="bar"><i style="width:${Math.min(100, t.players.length * 8)}%"></i></div><b>${t.players.length}</b></div><div class="meter"><span>Payroll</span><div class="bar"><i style="width:${Math.min(100, (teamSalary(t) / DATA.cap) * 100)}%"></i></div><b>${shortMoney(teamSalary(t))}</b></div><p class="muted">Need: ${teamNeed(t)} · Core: ${
+        `<section class="card"><div class="sectionTitle"><h3><span class="teamBadge" style="${badgeStyle(t.primary)}">${t.id}</span>${t.name}</h3><span>${t.status}</span></div><div class="cardPad"><div class="meter"><span>Roster</span><div class="bar"><i style="width:${Math.min(100, t.players.length * 8)}%"></i></div><b>${t.players.length}</b></div><div class="meter"><span>Payroll</span><div class="bar"><i style="width:${Math.min(100, (teamSalary(t) / DATA.cap) * 100)}%"></i></div><b>${shortMoney(teamSalary(t))}</b></div><p class="muted">Need: ${teamNeed(t)} · Core: ${
           t.players
             .filter((p) => p.protected)
             .map((p) => p.name.split(" ").slice(-1)[0])
@@ -948,9 +1293,7 @@ function statsLeadersSection() {
     ...S.roster.map((p) => ({ p, teamId: S.team.abbr })),
     ...S.teams.flatMap((t) => t.players.map((pl) => ({ p: pl, teamId: t.id }))),
   ];
-  const withStats = allPlayers.filter(
-    (x) => x.p.seasonStats && x.p.seasonStats.gp > 0,
-  );
+  const withStats = allPlayers.filter((x) => x.p.seasonStats && x.p.seasonStats.gp > 0);
   if (!withStats.length)
     return `<section class="card" style="margin-top:18px"><div class="sectionTitle"><h3>Stats Leaders</h3><span>play games to populate</span></div><div class="cardPad"><div class="empty">No games played yet this season.</div></div></section>`;
   const per = (x, k) => x.p.seasonStats[k] / Math.max(1, x.p.seasonStats.gp);
@@ -970,21 +1313,27 @@ function statsLeadersSection() {
   return `<div style="margin-top:18px"><h3>Stats Leaders</h3><div class="layout3" style="margin-top:10px">${table("pts", "Points", f)}${table("reb", "Rebounds", f)}${table("ast", "Assists", f)}</div></div>`;
 }
 
+function resetFaBase() {
+  _faBase = null;
+}
 function ensureSeason(force = false) {
   if (!S.started) return;
-  if (!S.season || force) {
+  if (!S.season || !Array.isArray(S.season.schedule) || force) {
+    S.week = 1;
+    if (S.coaching) S.coaching.lastTransitionWeek = 0;
     resetSeasonStats();
     snapshotComposites();
     S.season = {
-      currentGameIndex: 0,
       schedule: generateSchedule(),
       records: {},
       results: [],
     };
+  } else {
+    if (!S.season.records || typeof S.season.records !== "object") S.season.records = {};
+    if (!Array.isArray(S.season.results)) S.season.results = [];
   }
   leagueIds().forEach((id) => {
-    if (!S.season.records[id])
-      S.season.records[id] = { w: 0, l: 0, pf: 0, pa: 0, streak: "—" };
+    if (!S.season.records[id]) S.season.records[id] = { w: 0, l: 0, pf: 0, pa: 0, streak: "—" };
   });
 }
 function leagueIds() {
@@ -993,9 +1342,7 @@ function leagueIds() {
 function leagueChannelAvg(key) {
   const ids = leagueIds();
   if (!ids.length) return 65;
-  return Math.round(
-    ids.reduce((s, id) => s + (teamPower(id)[key] || 0), 0) / ids.length,
-  );
+  return Math.round(ids.reduce((s, id) => s + (teamPower(id)[key] || 0), 0) / ids.length);
 }
 function recommendPlan(oppPower) {
   const avgInt = leagueChannelAvg("intO");
@@ -1014,7 +1361,9 @@ function teamMeta(id) {
       primary: S.team.primary,
       players: S.roster,
     };
-  const t = S.teams.find((x) => x.id === id);
+  if (!_teamMap) _teamMap = new Map(S.teams.map((team) => [team.id, team]));
+  const t = _teamMap.get(id);
+  if (!t) return { id, name: id || "Unknown", primary: "#777", players: [] };
   return { id, name: t.name, primary: t.primary, players: t.players };
 }
 function seasonRecord(id) {
@@ -1044,17 +1393,13 @@ function generateSchedule() {
         played: false,
       });
     }
-  const userOpp = ids.filter((x) => x !== S.team.abbr).slice(0, 8);
-  userOpp.forEach((opp, k) =>
-    games.push({
-      id: "G" + n++,
-      week: 1 + ((k * 2) % 16),
-      home: k % 2 ? S.team.abbr : opp,
-      away: k % 2 ? opp : S.team.abbr,
-      played: false,
-      showcase: true,
-    }),
-  );
+  // Showcase games are labels on existing matchups, not extra fixtures. Adding
+  // eight bonus user games previously produced 30-38 games per team and made
+  // win-percentage standings depend on an uneven schedule.
+  games
+    .filter((g) => g.home === S.team.abbr || g.away === S.team.abbr)
+    .slice(0, 8)
+    .forEach((g) => (g.showcase = true));
   return games.sort((a, b) => a.week - b.week || a.id.localeCompare(b.id));
 }
 // Shared helper: the available (non-injured) rotation, best-first, capped at n.
@@ -1064,7 +1409,7 @@ function healthyRotation(players, n) {
     .slice()
     .filter((p) => !p.injury)
     .sort((a, b) => composite(b) - composite(a));
-  return n == null ? sorted : sorted.slice(0, n);
+  return n === null || n === undefined ? sorted : sorted.slice(0, n);
 }
 function teamPower(id) {
   if (_powerCacheOn && _powerCache[id]) return _powerCache[id];
@@ -1090,11 +1435,10 @@ function teamPower(id) {
   const top = players.slice(0, 8);
   // Heavier top-player weighting: top 3 carry ~63% of the team rating,
   // so star concentration matters more than bench depth.
-  const W = [2.0, 1.5, 1.2, 1.0, 0.8, 0.5, 0.4, 0.3];
+  const W = BALANCE.rotationWeights;
   const w = top.map((_, i) => W[i] ?? 0.3);
   const wSum = w.reduce((a, b) => a + b, 0);
-  const wavg = (k) =>
-    Math.round(top.reduce((s, p, i) => s + p.ratings[k] * w[i], 0) / wSum);
+  const wavg = (k) => Math.round(top.reduce((s, p, i) => s + p.ratings[k] * w[i], 0) / wSum);
   // Position-aware defensive share: guards defend the perimeter, bigs the paint.
   const defShare = (p) => {
     if (p.pos.includes("G")) return { per: 0.75, int: 0.25 };
@@ -1102,20 +1446,13 @@ function teamPower(id) {
     return { per: 0.5, int: 0.5 };
   };
   const posWeighted = (k, side) => {
-    const num = top.reduce(
-      (s, p, i) => s + p.ratings[k] * w[i] * defShare(p)[side],
-      0,
-    );
+    const num = top.reduce((s, p, i) => s + p.ratings[k] * w[i] * defShare(p)[side], 0);
     const den = top.reduce((s, p, i) => s + w[i] * defShare(p)[side], 0);
     return den ? Math.round(num / den) : 60;
   };
-  const perO = Math.round(
-    wavg("shooting") * 0.5 + wavg("playmaking") * 0.3 + wavg("iq") * 0.2,
-  );
+  const perO = Math.round(wavg("shooting") * 0.5 + wavg("playmaking") * 0.3 + wavg("iq") * 0.2);
   const intO = Math.round(
-    wavg("scoring") * 0.45 +
-      wavg("rebounding") * 0.2 +
-      wavg("athleticism") * 0.35,
+    wavg("scoring") * 0.45 + wavg("rebounding") * 0.2 + wavg("athleticism") * 0.35,
   );
   const perD = Math.round(
     posWeighted("defense", "per") * 0.55 +
@@ -1131,7 +1468,11 @@ function teamPower(id) {
   const def = Math.round((perD + intD) / 2);
   const reb = wavg("rebounding");
   const result = {
-    overall: Math.round(off * 0.45 + def * 0.4 + reb * 0.15),
+    overall: Math.round(
+      off * BALANCE.teamOverallWeights.offense +
+        def * BALANCE.teamOverallWeights.defense +
+        reb * BALANCE.teamOverallWeights.rebounding,
+    ),
     off,
     def,
     reb,
@@ -1146,7 +1487,14 @@ function teamPower(id) {
   return result;
 }
 function rand(min, max) {
-  return Math.floor(min + Math.random() * (max - min + 1));
+  return Math.floor(min + random() * (max - min + 1));
+}
+function random() {
+  // Mulberry32: compact, deterministic, and persisted with the save so any
+  // season can be reproduced from its seed and event sequence.
+  const result = ENGINE.nextRandom(S.rngState);
+  S.rngState = result.state;
+  return result.value;
 }
 function hcSystemMods(teamId) {
   let systemId = null;
@@ -1188,9 +1536,13 @@ function simScore(home, away, game) {
   const userIs = home === S.team.abbr ? "h" : away === S.team.abbr ? "a" : null;
   if (userIs && S.coaching) {
     const m = mod[userIs];
-    const f = S.coaching.weeklyFocus;
-    const asstTraits =
-      (S.coaches && S.coaches.assistant && S.coaches.assistant.traits) || [];
+    const focusApplies =
+      S.coaching.weeklyFocus &&
+      S.coaching.weeklyFocus !== "none" &&
+      game &&
+      S.coaching.focusWeek === game.week;
+    const f = focusApplies ? S.coaching.weeklyFocus : null;
+    const asstTraits = (S.coaches && S.coaches.assistant && S.coaches.assistant.traits) || [];
     const filmBuff = asstTraits.includes("film-buff") ? 1 : 0;
     if (f === "perO") m.perO += 2;
     else if (f === "perD") m.perD += 2;
@@ -1210,8 +1562,7 @@ function simScore(home, away, game) {
         m.intD += 1;
       }
       // Veteran Tactician (HC) and Defensive Coordinator (Asst) both juice game plans.
-      const hcTraits =
-        (S.coaches && S.coaches.head && S.coaches.head.traits) || [];
+      const hcTraits = (S.coaches && S.coaches.head && S.coaches.head.traits) || [];
       const vt = hcTraits.includes("veteran-tactician");
       const dc = asstTraits.includes("defensive-coordinator");
       const planBonus = vt || dc ? 4 : 3;
@@ -1225,11 +1576,7 @@ function simScore(home, away, game) {
       }
     }
     // Inspiring trait: pending buff from a prior loss.
-    if (
-      S.coaches &&
-      S.coaches.pendingBuff &&
-      S.coaches.pendingBuff.type === "inspiring"
-    ) {
+    if (S.coaches && S.coaches.pendingBuff && S.coaches.pendingBuff.type === "inspiring") {
       const b = S.coaches.pendingBuff.channelBonus || 3;
       m.perO += b;
       m.perD += b;
@@ -1257,22 +1604,26 @@ function simScore(home, away, game) {
   // Roster-depth penalty: thin benches add late-game variance.
   const hThin = Math.max(0, 10 - hp.depth);
   const aThin = Math.max(0, 10 - ap.depth);
-  const hBase = hPer + hInt + hRebEdge + 2.2; // 2.2 = home court
+  const hBase = hPer + hInt + hRebEdge + BALANCE.homeAdvantage;
   const aBase = aPer + aInt + aRebEdge;
-  let hs = Math.max(58, Math.round(hBase + rand(-7 - hThin, 8 + hThin)));
-  let as = Math.max(55, Math.round(aBase + rand(-7 - aThin, 8 + aThin)));
+  const hcTraits = (S.coaches && S.coaches.head && S.coaches.head.traits) || [];
+  let tight = 0;
+  if (userIs && hcTraits.includes("clutch")) tight += 3;
+  if (userIs && game && game.playoff && hcTraits.includes("championship-pedigree")) tight += 2;
+  let hs = Math.max(58, Math.round(hBase + rand(-7 - hThin + tight, 8 + hThin - tight)));
+  let as = Math.max(55, Math.round(aBase + rand(-7 - aThin + tight, 8 + aThin - tight)));
   // Break ties without a systematic home bias: pick the winner randomly.
   if (hs === as) {
-    if (Math.random() < 0.5) hs += rand(1, 5);
+    if (random() < 0.5) hs += rand(1, 5);
     else as += rand(1, 5);
   }
   return { hs, as, hp, ap };
 }
 // Dev helper: run N seasons over the current schedule and print win-rate by team.
 window.simTest = function (seasons = 20) {
-  if (!S.season || !S.season.schedule)
-    return console.log("Start a season first.");
-  const ids = S.teams.map((t) => t.id);
+  if (!S.season || !S.season.schedule) return console.log("Start a season first.");
+  const rngBefore = S.rngState;
+  const ids = leagueIds();
   const wins = Object.fromEntries(ids.map((i) => [i, 0]));
   const games = Object.fromEntries(ids.map((i) => [i, 0]));
   const sched = S.season.schedule.map((g) => ({ home: g.home, away: g.away }));
@@ -1302,11 +1653,12 @@ window.simTest = function (seasons = 20) {
     })
     .sort((a, b) => b.ovr - a.ovr);
   console.table(rows);
+  S.rngState = rngBefore;
   return rows;
 };
 // Distribute game stats across top-8 rotation and accumulate season totals.
 // Returns top-3 box-score lines for backward-compat display.
-function distributeAndRecord(id, ptsFor, won) {
+function distributeAndRecord(id, ptsFor, won, accumulate = true) {
   const team = teamMeta(id);
   const healthy = healthyRotation(team.players, 8);
   if (!healthy.length) return [];
@@ -1315,37 +1667,28 @@ function distributeAndRecord(id, ptsFor, won) {
   // light noise), then apportion integer points that sum EXACTLY to the team's
   // score. The previous version handed stars fixed chunks and let the remainder
   // go negative, so the box score never reconciled to the scoreboard.
-  const slotW = [1.0, 0.82, 0.66, 0.5, 0.4, 0.3, 0.22, 0.16];
+  const slotW = BALANCE.statShareWeights;
   const weights = healthy.map((p, i) => {
     const sc = (p.ratings && p.ratings.scoring) || 60;
-    return (slotW[i] ?? 0.14) * (0.6 + sc / 100) * (0.85 + Math.random() * 0.3);
+    return (slotW[i] ?? 0.14) * (0.6 + sc / 100) * (0.85 + random() * 0.3);
   });
-  const wSum = weights.reduce((a, b) => a + b, 0) || 1;
-  const raw = weights.map((w) => (w / wSum) * total);
-  const pts = raw.map((x) => Math.floor(x));
-  // Largest-remainder method: hand out the leftover points to the largest
-  // fractional shares so the totals are exact.
-  let leftover = total - pts.reduce((a, b) => a + b, 0);
-  const order = raw
-    .map((x, i) => ({ i, frac: x - Math.floor(x) }))
-    .sort((a, b) => b.frac - a.frac);
-  for (let k = 0; k < leftover && order.length; k++)
-    pts[order[k % order.length].i] += 1;
+  const pts = ENGINE.allocateIntegerTotal(weights, total);
   const rotation = healthy.map((p, i) => ({
     player: p,
     pts: pts[i],
     reb: rand(p.pos.includes("C") ? 5 : 2, p.pos.includes("G") ? 7 : 11),
     ast: rand(p.pos.includes("G") ? 4 : 1, p.pos.includes("C") ? 4 : 8),
   }));
-  rotation.forEach((r) => {
-    if (!r.player.seasonStats)
-      r.player.seasonStats = { gp: 0, pts: 0, reb: 0, ast: 0, w: 0 };
-    r.player.seasonStats.gp += 1;
-    r.player.seasonStats.pts += r.pts;
-    r.player.seasonStats.reb += r.reb;
-    r.player.seasonStats.ast += r.ast;
-    if (won) r.player.seasonStats.w += 1;
-  });
+  if (accumulate) {
+    rotation.forEach((r) => {
+      if (!r.player.seasonStats) r.player.seasonStats = { gp: 0, pts: 0, reb: 0, ast: 0, w: 0 };
+      r.player.seasonStats.gp += 1;
+      r.player.seasonStats.pts += r.pts;
+      r.player.seasonStats.reb += r.reb;
+      r.player.seasonStats.ast += r.ast;
+      if (won) r.player.seasonStats.w += 1;
+    });
+  }
   // Box score shows the top three scorers (not just the highest-rated players).
   return rotation
     .slice()
@@ -1379,11 +1722,28 @@ function simulateGame(g) {
   // Ratings can change between games (dev growth), so the composite cache from a
   // prior game must be dropped before this one.
   clearComputeCaches();
+  const existingInjuries = {
+    [g.home]: new Set(
+      teamMeta(g.home)
+        .players.filter((p) => p.injury)
+        .map((p) => p.id),
+    ),
+    [g.away]: new Set(
+      teamMeta(g.away)
+        .players.filter((p) => p.injury)
+        .map((p) => p.id),
+    ),
+  };
   const r = simScore(g.home, g.away, g);
-  rollInjuries(g);
   const winner = r.hs > r.as ? g.home : g.away;
-  const homeBox = distributeAndRecord(g.home, r.hs, winner === g.home);
-  const awayBox = distributeAndRecord(g.away, r.as, winner === g.away);
+  const accumulate = !g.playoff;
+  const homeBox = distributeAndRecord(g.home, r.hs, winner === g.home, accumulate);
+  const awayBox = distributeAndRecord(g.away, r.as, winner === g.away, accumulate);
+  // Existing injuries miss this game and count it down afterward. New injuries
+  // are rolled last so a one-game injury actually misses the next game.
+  rollInjuries(g);
+  tickTeamInjuries(g.home, existingInjuries[g.home]);
+  tickTeamInjuries(g.away, existingInjuries[g.away]);
   Object.assign(g, {
     played: true,
     homeScore: r.hs,
@@ -1418,22 +1778,18 @@ function simulateGame(g) {
   }
   S.season.results.unshift(g.id);
   addLog(
-    g.home === S.team.abbr || g.away === S.team.abbr
-      ? "Game final"
-      : "League final",
+    g.home === S.team.abbr || g.away === S.team.abbr ? "Game final" : "League final",
     `${teamMeta(g.away).name} ${g.awayScore}, ${teamMeta(g.home).name} ${g.homeScore}. ${teamMeta(g.winner).name} win.`,
   );
   if (g.home === S.team.abbr || g.away === S.team.abbr) {
     // Each user game advances the calendar: dev growth, market churn, injury healing, press.
-    applyWeeklyTransition();
+    applyWeeklyTransition(g.week);
     marketChurn();
-    tickAllInjuries();
     maybeTriggerPress(g);
     // Consume Inspiring buff if it was set (it applied this game).
     if (S.coaches && S.coaches.pendingBuff) S.coaches.pendingBuff = null;
     // Inspiring trait: a loss sets the buff for the NEXT user game.
-    const hcTraits =
-      (S.coaches && S.coaches.head && S.coaches.head.traits) || [];
+    const hcTraits = (S.coaches && S.coaches.head && S.coaches.head.traits) || [];
     if (g.winner !== S.team.abbr && hcTraits.includes("inspiring")) {
       S.coaches.pendingBuff = { type: "inspiring", channelBonus: 3 };
       addLog(
@@ -1442,12 +1798,9 @@ function simulateGame(g) {
       );
     }
     // Motivator (assistant): mood bump after each user game.
-    const asstTraits =
-      (S.coaches && S.coaches.assistant && S.coaches.assistant.traits) || [];
+    const asstTraits = (S.coaches && S.coaches.assistant && S.coaches.assistant.traits) || [];
     if (asstTraits.includes("motivator")) {
-      S.roster.forEach(
-        (p) => (p.mood = Math.max(20, Math.min(99, (p.mood || 60) + 2))),
-      );
+      S.roster.forEach((p) => (p.mood = Math.max(20, Math.min(99, (p.mood || 60) + 2))));
     }
     // Scout Genius (assistant): auto-scout the next user opponent.
     if (asstTraits.includes("scout-genius")) {
@@ -1463,6 +1816,7 @@ function simulateGame(g) {
   const next = S.season.schedule.find((x) => !x.played);
   if (next) S.week = next.week;
   else S.week = Math.max(...S.season.schedule.map((x) => x.week), S.week) + 1;
+  maybeResetWeeklyFocus(S.week);
 }
 function nextUnplayed() {
   return S.season.schedule.find((g) => !g.played);
@@ -1479,6 +1833,8 @@ function simNextGame() {
   if (S.playoffs && S.playoffs.active && !S.playoffs.complete) {
     return simNextPlayoffGame();
   }
+  if (!requireOpeningNightReady()) return;
+  S.phase = `${S.year} Regular Season`;
   ensureSeason();
   const mine = nextUserGame();
   if (!mine) {
@@ -1535,17 +1891,19 @@ function closeGameDay() {
   render();
 }
 function simWeek() {
+  if (!requireOpeningNightReady()) return;
+  S.phase = `${S.year} Regular Season`;
   ensureSeason();
   const g = nextUnplayed();
   if (!g) return toast("Season complete.");
   const week = g.week;
-  S.season.schedule
-    .filter((x) => !x.played && x.week === week)
-    .forEach(simulateGame);
+  S.season.schedule.filter((x) => !x.played && x.week === week).forEach(simulateGame);
   S.week = Math.max(S.week, week + 1);
   render();
 }
 function simSeason() {
+  if (!requireOpeningNightReady()) return;
+  S.phase = `${S.year} Regular Season`;
   ensureSeason();
   S.season.schedule.filter((x) => !x.played).forEach(simulateGame);
   // Derive the week from the schedule rather than hardcoding 17, so the topbar
@@ -1570,8 +1928,7 @@ function standingsRows() {
         id,
         ...r,
         pct: r.w + r.l ? r.w / (r.w + r.l) : 0,
-        diff:
-          r.w + r.l ? Math.round(((r.pf - r.pa) / (r.w + r.l)) * 10) / 10 : 0,
+        diff: r.w + r.l ? Math.round(((r.pf - r.pa) / (r.w + r.l)) * 10) / 10 : 0,
       };
     })
     .sort((a, b) => b.pct - a.pct || b.diff - a.diff);
@@ -1587,7 +1944,7 @@ function schedulePage() {
     : "";
   const heroBlock = next
     ? nextGameHero(next)
-    : `<section class="card"><div class="cardPad"><h3>Season complete</h3><p class="muted">All games played. Move on to the offseason.</p>${offseasonBtn}</div></section>`;
+    : `<section class="card"><div class="cardPad"><h3>Season complete</h3><p class="muted">All regular-season games are final. Enter the playoffs next; the offseason follows awards.</p>${offseasonBtn}</div></section>`;
   const remaining = myGames.slice(1);
   const myList = remaining.length
     ? remaining.map(myGameCard).join("")
@@ -1633,7 +1990,7 @@ function myGameCard(g) {
     scouted: false,
     plan: null,
   };
-  return `<div class="logItem"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px"><b>Week ${g.week} · ${isHome ? "vs" : "at"} <span class="teamBadge" style="background:${opp.primary}">${oppId}</span> ${opp.name}</b><span class="pill">${oppRec.w}-${oppRec.l}</span></div><div class="mini" style="margin-top:6px">${gp.scouted ? "Scouted" : "Unscouted"} · Plan: ${gp.plan === "pack" ? "Pack" : gp.plan === "extend" ? "Extend" : "—"}</div><div class="actions" style="margin-top:8px">${gp.scouted ? "" : `<button class="btn secondary" data-scout="${g.id}">Scout</button>`}<button class="btn ${gp.plan === "pack" ? "" : "secondary"}" data-plan="${g.id}|pack">Pack</button><button class="btn ${gp.plan === "extend" ? "" : "secondary"}" data-plan="${g.id}|extend">Extend</button></div></div>`;
+  return `<div class="logItem"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px"><b>Week ${g.week} · ${isHome ? "vs" : "at"} <span class="teamBadge" style="${badgeStyle(opp.primary)}">${oppId}</span> ${opp.name}</b><span class="pill">${oppRec.w}-${oppRec.l}</span></div><div class="mini" style="margin-top:6px">${gp.scouted ? "Scouted" : "Unscouted"} · Plan: ${gp.plan === "pack" ? "Pack" : gp.plan === "extend" ? "Extend" : "—"}</div><div class="actions" style="margin-top:8px">${gp.scouted ? "" : `<button class="btn secondary" data-scout="${g.id}">Scout</button>`}<button class="btn ${gp.plan === "pack" ? "" : "secondary"}" data-plan="${g.id}|pack">Pack</button><button class="btn ${gp.plan === "extend" ? "" : "secondary"}" data-plan="${g.id}|extend">Extend</button></div></div>`;
 }
 function currentFocusLabel() {
   const f = (FOCUS_OPTIONS || []).find((o) => o.id === S.coaching.weeklyFocus);
@@ -1659,10 +2016,8 @@ function gameDayView() {
     scouted: false,
     plan: null,
   };
-  const topRotation = S.roster
-    .slice()
-    .sort((a, b) => composite(b) - composite(a))
-    .slice(0, 8);
+  const topRotation = healthyRotation(S.roster, 8);
+  const injuredRotation = S.roster.filter((p) => p.injury);
   const injuredCount = S.roster.filter((p) => p.injury).length;
   const recommendedPlan = recommendPlan(oppPower);
   const recLine =
@@ -1675,7 +2030,12 @@ function gameDayView() {
     ? `<div class="impact" style="margin-top:10px"><div class="impactRow"><span>Per O</span><div class="bar"><i style="width:${oppPower.perO}%"></i></div><b>${oppPower.perO}</b></div><div class="impactRow"><span>Per D</span><div class="bar"><i style="width:${oppPower.perD}%"></i></div><b>${oppPower.perD}</b></div><div class="impactRow"><span>Int O</span><div class="bar"><i style="width:${oppPower.intO}%"></i></div><b>${oppPower.intO}</b></div><div class="impactRow"><span>Int D</span><div class="bar"><i style="width:${oppPower.intD}%"></i></div><b>${oppPower.intD}</b></div></div><p class="muted" style="margin-top:8px">${recLine}</p>`
     : `<div style="margin-top:10px"><button class="btn" data-scout="${g.id}">Scout Opponent</button><p class="muted" style="margin-top:8px">Skipping the scout means flying blind. You can still set a plan, but you won't know which lane to defend.</p></div>`;
   const planBlock = `<div class="actions" style="margin-top:10px"><button class="btn ${gp.plan === "pack" ? "" : "secondary"}" data-plan="${g.id}|pack">Pack the Paint</button><button class="btn ${gp.plan === "extend" ? "" : "secondary"}" data-plan="${g.id}|extend">Extend Defense</button>${gp.plan ? `<button class="btn ghost" data-plan="${g.id}|none">Clear</button>` : ""}</div>`;
-  const rotationTable = `<table class="table"><thead><tr><th>Player</th><th>Pos</th><th>Status</th><th>Mood</th></tr></thead><tbody>${topRotation.map((p) => `<tr style="${p.injury ? "opacity:.5" : ""}"><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div class="playerName">${escapeHtml(p.name)}</div></div></td><td>${escapeHtml(p.pos)}</td><td>${injuryBadge(p)}</td><td>${p.mood || 60}</td></tr>`).join("")}</tbody></table>`;
+  const rotationTable = `<table class="table"><thead><tr><th>Player</th><th>Pos</th><th>Status</th><th>Mood</th></tr></thead><tbody>${topRotation.map((p) => `<tr><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div class="playerName">${escapeHtml(p.name)}</div></div></td><td>${escapeHtml(p.pos)}</td><td>${injuryBadge(p)}</td><td>${p.mood || 60}</td></tr>`).join("")}${injuredRotation
+    .map(
+      (p) =>
+        `<tr style="opacity:.5"><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div class="playerName">${escapeHtml(p.name)}</div></div></td><td>${escapeHtml(p.pos)}</td><td>${injuryBadge(p)}</td><td>${p.mood || 60}</td></tr>`,
+    )
+    .join("")}</tbody></table>`;
   return `<section class="card"><div class="sectionTitle"><h3>Game Day · Week ${g.week} · ${isHome ? "vs" : "at"} ${opp.name}</h3><span>${opp.id} ${oppRec.w}-${oppRec.l}</span></div><div class="cardPad"><div class="layout2"><section><h3 style="margin-top:0">Opponent</h3><p class="muted">${opp.name} · ${oppRec.w}-${oppRec.l} · power index ${oppPower.overall}</p>${scoutBlock}<h3 style="margin-top:18px">Your Game Plan</h3>${planBlock}</section><section><h3 style="margin-top:0">Your Prep</h3><p class="muted">Weekly Focus: <b>${currentFocusLabel()}</b></p><p class="muted">Plan: <b>${gp.plan === "pack" ? "Pack the Paint" : gp.plan === "extend" ? "Extend Defense" : "Not set"}</b></p><p class="muted">Power Index: <b>${myPower.overall}</b> · Per ${myPower.perO}/${myPower.perD} · Int ${myPower.intO}/${myPower.intD}</p><p class="muted">Injured players: <b>${injuredCount}</b></p></section></div><h3 style="margin-top:18px">Top-8 Rotation</h3>${rotationTable}<div class="actions" style="margin-top:18px"><button class="btn" data-action="playQueuedGame" style="font-size:15px;padding:14px 20px">Play Game →</button><button class="btn secondary" data-action="closeGameDay">Hold Off</button></div></div></section>`;
 }
 function findAnyGame(gameId) {
@@ -1700,17 +2060,18 @@ function postGameView() {
   const margin = Math.abs(userScore - oppScore);
   const userBox = isHome ? g.box.home : g.box.away;
   const oppBox = isHome ? g.box.away : g.box.home;
+  const oppName = escapeHtml(opp.name);
   const headline = won
     ? margin >= 15
-      ? `Statement win over ${opp.name}!`
+      ? `Statement win over ${oppName}!`
       : margin <= 4
-        ? `Hard-fought win over ${opp.name}`
-        : `Win over ${opp.name}`
+        ? `Hard-fought win over ${oppName}`
+        : `Win over ${oppName}`
     : margin >= 15
-      ? `Blowout loss to ${opp.name}`
+      ? `Blowout loss to ${oppName}`
       : margin <= 4
-        ? `Heartbreaking loss to ${opp.name}`
-        : `Loss to ${opp.name}`;
+        ? `Heartbreaking loss to ${oppName}`
+        : `Loss to ${oppName}`;
   const bannerBg = won ? "#fff6ee" : "#fde8e6";
   const bannerBorder = won ? "var(--orange)" : "var(--red)";
   const press = S.coaching.pendingPress;
@@ -1719,13 +2080,13 @@ function postGameView() {
     : "";
   const boxRow = (p) =>
     `<div class="checkRow"><div><b>${escapeHtml(p.name)}</b> <span class="pill">${escapeHtml(p.pos)}</span><div class="mini">${p.pts} pts · ${p.reb} reb · ${p.ast} ast</div></div></div>`;
-  return `<section class="card"><div class="sectionTitle"><h3>${headline}</h3><span>Week ${g.week}</span></div><div class="cardPad"><div style="display:flex;gap:24px;justify-content:center;align-items:center;padding:24px;background:${bannerBg};border:2px solid ${bannerBorder};border-radius:18px;margin-bottom:18px"><div style="text-align:center;min-width:140px"><div style="font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:800">${isHome ? "Home" : "Away"}</div><div style="font-size:18px;font-weight:800">${escapeHtml(S.team.nickname)}</div><div style="font-size:56px;font-weight:900;letter-spacing:-.04em;color:${won ? "var(--green)" : "var(--ink)"}">${userScore}</div></div><div style="font-size:22px;color:var(--muted);font-weight:800">vs</div><div style="text-align:center;min-width:140px"><div style="font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:800">${isHome ? "Away" : "Home"}</div><div style="font-size:18px;font-weight:800">${opp.name}</div><div style="font-size:56px;font-weight:900;letter-spacing:-.04em;color:${!won ? "var(--green)" : "var(--ink)"}">${oppScore}</div></div></div>${pressBlock}<div class="layout2" style="margin-top:18px"><section><h3>${escapeHtml(S.team.nickname)} top performers</h3>${userBox.map(boxRow).join("")}</section><section><h3>${opp.name} top performers</h3>${oppBox.map(boxRow).join("")}</section></div><div class="actions" style="margin-top:20px"><button class="btn" data-action="closePostGame" style="font-size:15px;padding:14px 20px">Continue →</button></div></div></section>`;
+  return `<section class="card"><div class="sectionTitle"><h3>${headline}</h3><span>Week ${g.week}</span></div><div class="cardPad"><div style="display:flex;gap:24px;justify-content:center;align-items:center;padding:24px;background:${bannerBg};border:2px solid ${bannerBorder};border-radius:18px;margin-bottom:18px"><div style="text-align:center;min-width:140px"><div style="font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:800">${isHome ? "Home" : "Away"}</div><div style="font-size:18px;font-weight:800">${escapeHtml(S.team.nickname)}</div><div style="font-size:56px;font-weight:900;letter-spacing:-.04em;color:${won ? "var(--green)" : "var(--ink)"}">${userScore}</div></div><div style="font-size:22px;color:var(--muted);font-weight:800">vs</div><div style="text-align:center;min-width:140px"><div style="font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;font-weight:800">${isHome ? "Away" : "Home"}</div><div style="font-size:18px;font-weight:800">${oppName}</div><div style="font-size:56px;font-weight:900;letter-spacing:-.04em;color:${!won ? "var(--green)" : "var(--ink)"}">${oppScore}</div></div></div>${pressBlock}<div class="layout2" style="margin-top:18px"><section><h3>${escapeHtml(S.team.nickname)} top performers</h3>${userBox.map(boxRow).join("")}</section><section><h3>${opp.name} top performers</h3>${oppBox.map(boxRow).join("")}</section></div><div class="actions" style="margin-top:20px"><button class="btn" data-action="closePostGame" style="font-size:15px;padding:14px 20px">Continue →</button></div></div></section>`;
 }
 function seasonKpis() {
   const r = seasonRecord(S.team.abbr);
   const p = teamPower(S.team.abbr);
-  const next = nextUnplayed();
-  return `<div class="grid kpis"><div class="card kpi"><label>Record</label><div class="value">${r.w}-${r.l}</div><small>${r.w + r.l ? Math.round((r.w / (r.w + r.l)) * 100) : 0}% win rate</small></div><div class="card kpi"><label>Power Index</label><div class="value">${p.overall}</div><small>Per ${p.perO}/${p.perD} · Int ${p.intO}/${p.intD} · Reb ${p.reb}</small></div><div class="card kpi"><label>Next Game</label><div class="value">${next ? `W${next.week}` : "Done"}</div><small>${next ? `${teamMeta(next.away).id} at ${teamMeta(next.home).id}` : "Season complete"}</small></div><div class="card kpi"><label>Playoff Cut</label><div class="value">Top 8</div><small>${playoffStatus()}</small></div></div>`;
+  const next = nextUserGame();
+  return `<div class="grid kpis"><div class="card kpi"><label>Record</label><div class="value">${r.w}-${r.l}</div><small>${r.w + r.l ? Math.round((r.w / (r.w + r.l)) * 100) : 0}% win rate</small></div><div class="card kpi"><label>Power Index</label><div class="value">${p.overall}</div><small>Per ${p.perO}/${p.perD} · Int ${p.intO}/${p.intD} · Reb ${p.reb}</small></div><div class="card kpi"><label>Next Game</label><div class="value">${next ? `W${next.week}` : "Done"}</div><small>${next ? `${teamMeta(next.away).id} at ${teamMeta(next.home).id}` : "Season complete"}</small></div><div class="card kpi"><label>Playoff Cut</label><div class="value">Top 8</div><small>${playoffStatus()}</small></div></div><details class="ratingGlossary"><summary>How to read the ratings</summary><p><b>Per O / Per D</b> are perimeter offense and defense. <b>Int O / Int D</b> are interior offense and defense. <b>Reb</b> is rebounding. <b>Power Index</b> combines those channels; <b>Diff</b> is average point differential.</p></details>`;
 }
 function playoffStatus() {
   const rows = standingsRows();
@@ -1747,13 +2108,13 @@ function gameRow(g) {
   const home = teamMeta(g.home),
     away = teamMeta(g.away);
   const user = g.home === S.team.abbr || g.away === S.team.abbr;
-  return `<div class="gameRow ${g.played ? "played" : ""} ${user ? "userGame" : ""}"><div><b>Week ${g.week}</b><span class="mini">${g.showcase ? " · showcase matchup" : ""}</span></div><div><span class="teamBadge" style="background:${away.primary}">${away.id}</span>${away.name}</div><div class="scoreCell">${g.played ? g.awayScore : "—"}</div><div><span class="teamBadge" style="background:${home.primary}">${home.id}</span>${home.name}</div><div class="scoreCell">${g.played ? g.homeScore : "—"}</div><div>${g.played ? `<span class="pill ${g.winner === S.team.abbr ? "good" : ""}">${teamMeta(g.winner).id} win</span>` : '<span class="pill warn">upcoming</span>'}</div></div>`;
+  return `<div class="gameRow ${g.played ? "played" : ""} ${user ? "userGame" : ""}"><div><b>Week ${g.week}</b><span class="mini">${g.showcase ? " · showcase matchup" : ""}</span></div><div><span class="teamBadge" style="${badgeStyle(away.primary)}">${away.id}</span>${away.name}</div><div class="scoreCell">${g.played ? g.awayScore : "—"}</div><div><span class="teamBadge" style="${badgeStyle(home.primary)}">${home.id}</span>${home.name}</div><div class="scoreCell">${g.played ? g.homeScore : "—"}</div><div>${g.played ? `<span class="pill ${g.winner === S.team.abbr ? "good" : ""}">${teamMeta(g.winner).id} win</span>` : '<span class="pill warn">upcoming</span>'}</div></div>`;
 }
 function standingsTable() {
   return `<table class="table"><thead><tr><th>Rank</th><th>Team</th><th>W-L</th><th>Pct</th><th>Diff</th><th>Streak</th></tr></thead><tbody>${standingsRows()
     .map(
       (r, i) =>
-        `<tr class="${r.id === S.team.abbr ? "highlightRow" : ""}"><td>${i + 1}</td><td><span class="teamBadge" style="background:${teamMeta(r.id).primary}">${r.id}</span>${teamMeta(r.id).name}</td><td>${r.w}-${r.l}</td><td>${r.pct.toFixed(3)}</td><td>${r.diff > 0 ? "+" : ""}${r.diff}</td><td>${r.streak}</td></tr>`,
+        `<tr class="${r.id === S.team.abbr ? "highlightRow" : ""}"><td>${i + 1}</td><td><span class="teamBadge" style="${badgeStyle(teamMeta(r.id).primary)}">${escapeHtml(r.id)}</span>${escapeHtml(teamMeta(r.id).name)}</td><td>${r.w}-${r.l}</td><td>${r.pct.toFixed(3)}</td><td>${r.diff > 0 ? "+" : ""}${r.diff}</td><td>${r.streak}</td></tr>`,
     )
     .join("")}</tbody></table>`;
 }
@@ -1766,16 +2127,14 @@ function recentResults() {
       // findAnyGame resolves both regular-season and playoff games.
       const g = findAnyGame(id);
       if (!g) return "";
-      const top = [...(g.box?.away || []), ...(g.box?.home || [])].sort(
-        (a, b) => b.pts - a.pts,
-      )[0];
-      return `<div class="logItem"><b>${teamMeta(g.away).id} ${g.awayScore} @ ${teamMeta(g.home).id} ${g.homeScore}</b><p class="muted">Winner: ${teamMeta(g.winner).name}. Top line: ${top?.name ? escapeHtml(top.name) : "—"} · ${top?.pts || 0} pts, ${top?.reb || 0} reb, ${top?.ast || 0} ast.</p></div>`;
+      const top = [...(g.box?.away || []), ...(g.box?.home || [])].sort((a, b) => b.pts - a.pts)[0];
+      return `<div class="logItem"><b>${escapeHtml(teamMeta(g.away).id)} ${g.awayScore} @ ${escapeHtml(teamMeta(g.home).id)} ${g.homeScore}</b><p class="muted">Winner: ${escapeHtml(teamMeta(g.winner).name)}. Top line: ${top?.name ? escapeHtml(top.name) : "—"} · ${top?.pts || 0} pts, ${top?.reb || 0} reb, ${top?.ast || 0} ast.</p></div>`;
     })
     .join("");
 }
 
 function setupPage() {
-  return `<div class="setup"><section class="hero"><div><h1>Build the next WNBA front office.</h1><p>Choose a market, name the expansion team, set the colors, then enter a live-feeling draft room with cap pressure, protected stars, hidden ratings, trades, waivers, and a real roster-building dashboard.</p></div><div><div class="previewJersey">${abbr(S.team.city, S.team.nickname)}</div><p class="mini">White/orange dashboard theme. Your selected colors drive team accents throughout the UI.</p></div></section><section class="card form"><h2>Expansion Setup</h2><div class="field"><label>Preset city</label><select id="citySelect">${DATA.expansionCities.map((c, i) => `<option value="${i}" ${S.team.city === c.city ? "selected" : ""}>${c.city} · suggested ${c.nickname}</option>`).join("")}</select></div><div class="tiles">${DATA.expansionCities.map((c, i) => `<div class="cityTile ${S.team.city === c.city ? "selected" : ""}" data-citytile="${i}"><strong>${c.city}</strong><small>Market ${c.market} · pressure ${c.pressure} · ${c.arena}</small></div>`).join("")}</div><br><div class="field"><label>Team nickname</label><input id="nickInput" value="${S.team.nickname}" placeholder="Foundry"></div><div class="field"><label>Arena</label><input id="arenaInput" value="${S.team.arena}"></div><div class="colorRow"><div class="field" style="flex:1"><label>Primary</label><input id="primaryInput" type="color" value="${S.team.primary}"></div><div class="field" style="flex:1"><label>Secondary</label><input id="secondaryInput" type="color" value="${S.team.secondary}"></div></div><div class="actions"><button class="btn" data-action="start">Enter Front Office</button><button class="btn secondary" data-action="randomize">Randomize Identity</button></div><p class="muted">Prototype includes 15 existing/franchise teams, expansion draft pool, trade engine, waivers, dashboard KPIs, scouting cards, hidden player ratings and local autosave.</p></section></div>`;
+  return `<div class="setup"><section class="hero"><div><h1>Build the next WNBA front office.</h1><p>Choose a market, name the expansion team, set the colors, then enter a live-feeling draft room with cap pressure, protected stars, hidden ratings, trades, waivers, and a real roster-building dashboard.</p></div><div><div class="previewJersey">${abbr(S.team.city, S.team.nickname)}</div><p class="mini">White/orange dashboard theme. Your selected colors drive team accents throughout the UI.</p></div></section><section class="card form"><h2>Expansion Setup</h2><div class="field"><label for="citySelect">Preset city</label><select id="citySelect">${DATA.expansionCities.map((c, i) => `<option value="${i}" ${S.team.city === c.city ? "selected" : ""}>${c.city} · suggested ${c.nickname}</option>`).join("")}</select></div><div class="tiles" role="radiogroup" aria-label="Expansion city presets">${DATA.expansionCities.map((c, i) => `<button type="button" class="cityTile ${S.team.city === c.city ? "selected" : ""}" data-citytile="${i}" role="radio" aria-checked="${S.team.city === c.city}"><strong>${c.city}</strong><small>Market ${c.market} · pressure ${c.pressure} · ${c.arena}</small></button>`).join("")}</div><br><div class="field"><label for="nickInput">Team nickname</label><input id="nickInput" value="${escapeAttr(S.team.nickname)}" placeholder="Foundry"></div><div class="field"><label for="arenaInput">Arena</label><input id="arenaInput" value="${escapeAttr(S.team.arena)}"></div><div class="colorRow"><div class="field" style="flex:1"><label for="primaryInput">Primary</label><input id="primaryInput" type="color" value="${escapeAttr(S.team.primary)}"></div><div class="field" style="flex:1"><label for="secondaryInput">Secondary</label><input id="secondaryInput" type="color" value="${escapeAttr(S.team.secondary)}"></div></div><div class="actions"><button class="btn" data-action="start">Enter Front Office</button><button class="btn secondary" data-action="randomize">Randomize Identity</button></div><p class="muted">Prototype includes 15 existing/franchise teams, expansion draft pool, trade engine, waivers, dashboard KPIs, scouting cards, hidden player ratings and local autosave.</p></section></div>`;
 }
 function abbr(city, nick) {
   return ((city || "").slice(0, 1) + (nick || "").slice(0, 2)).toUpperCase();
@@ -1783,9 +2142,12 @@ function abbr(city, nick) {
 // Guarantee the user team id can't collide with an existing NPC team id, which
 // would make leagueIds()/teamMeta()/standings conflate two teams (self-games,
 // double-counted records). Falls back through letters then a numeric suffix.
-function uniqueUserAbbr(city, nick) {
-  const taken = new Set((DATA.teams || []).map((t) => t.id));
-  let base = abbr(city, nick) || "EXP";
+function uniqueUserAbbr(city, nick, teams) {
+  return uniqueAbbrAgainst(abbr(city, nick), city, nick, teams || DATA.teams);
+}
+function uniqueAbbrAgainst(proposed, city, nick, teams) {
+  const taken = new Set((teams || DATA.teams || []).map((t) => t.id));
+  let base = (proposed || abbr(city, nick) || "EXP").toUpperCase();
   if (!taken.has(base)) return base;
   const cityLetter = (city || "X").slice(0, 1).toUpperCase();
   for (let i = 0; i < 26; i++) {
@@ -1801,11 +2163,12 @@ function modalHtml() {
   if (modal.type === "player") {
     const p = findPlayer(modal.id);
     if (!p) return "";
-    return `<div class="modalShade"><div class="modal"><div class="modalHeader"><div style="display:flex;gap:14px;align-items:center">${portraitHtml(p, "lg")}<h3>${escapeHtml(p.name)} <span class="pill">${escapeHtml(p.pos)}</span></h3></div><button class="close" data-close>Close</button></div><div class="modalBody"><p>${escapeHtml(p.scouting)}</p><div class="layout2"><div><h3>Strengths</h3><p class="muted">${escapeHtml(p.strengths)}</p><h3>Weaknesses</h3><p class="muted">${escapeHtml(p.weaknesses)}</p><h3>Contract</h3><p class="muted">${shortMoney(p.salary)} · ${p.years} year(s) · ${p.protected ? "protected/core asset" : "available/negotiable"}</p></div><div><h3>Scouting Department View</h3><p class="muted">Numerical ratings are intentionally hidden in normal play. This panel reveals directional grades only.</p>${["scoring", "shooting", "playmaking", "defense", "rebounding", "athleticism", "iq", "potential"].map((k) => gradeRow(k, p.ratings[k])).join("")}</div></div></div></div></div>`;
+    return `<div class="modalShade" data-modal-shade><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modalHeader"><div style="display:flex;gap:14px;align-items:center">${portraitHtml(p, "lg")}<h3 id="modal-title">${escapeHtml(p.name)} <span class="pill">${escapeHtml(p.pos)}</span></h3></div><button class="close" data-close aria-label="Close player scout">Close</button></div><div class="modalBody"><p>${escapeHtml(p.scouting)}</p><div class="layout2"><div><h3>Strengths</h3><p class="muted">${escapeHtml(p.strengths)}</p><h3>Weaknesses</h3><p class="muted">${escapeHtml(p.weaknesses)}</p><h3>Contract</h3><p class="muted">${shortMoney(p.salary)} · ${p.years} year(s) · ${p.protected ? "protected/core asset" : "available/negotiable"}</p></div><div><h3>Scouting Department View</h3><p class="muted">Numerical ratings are intentionally hidden in normal play. This panel reveals directional grades only.</p>${["scoring", "shooting", "playmaking", "defense", "rebounding", "athleticism", "iq", "potential"].map((k) => gradeRow(k, p.ratings[k])).join("")}</div></div></div></div></div>`;
   }
   if (modal.type === "team") {
     const t = S.teams.find((x) => x.id === modal.id);
-    return `<div class="modalShade"><div class="modal"><div class="modalHeader"><h3>${t.name}</h3><button class="close" data-close>Close</button></div><div class="modalBody">${rosterTable(t.players)}</div></div></div>`;
+    if (!t) return "";
+    return `<div class="modalShade" data-modal-shade><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modalHeader"><h3 id="modal-title">${escapeHtml(t.name)}</h3><button class="close" data-close aria-label="Close team roster">Close</button></div><div class="modalBody">${rosterTable(t.players)}</div></div></div>`;
   }
   if (modal.type === "hire-coach") {
     const role = modal.role;
@@ -1823,159 +2186,157 @@ function modalHtml() {
     const poolHtml = pool.length
       ? pool.map((c) => coachCard(c, role, false)).join("")
       : '<div class="empty">No available coaches.</div>';
-    return `<div class="modalShade"><div class="modal" style="width:min(820px,100%)"><div class="modalHeader"><h3>Hire ${roleLabel}</h3><button class="close" data-close>Close</button></div><div class="modalBody">${currentCard}<h3 style="margin-top:18px">Free Agent Pool</h3><div class="log">${poolHtml}</div></div></div></div>`;
+    return `<div class="modalShade" data-modal-shade><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" style="width:min(820px,100%)"><div class="modalHeader"><h3 id="modal-title">Hire ${roleLabel}</h3><button class="close" data-close aria-label="Close coach hiring">Close</button></div><div class="modalBody">${currentCard}<h3 style="margin-top:18px">Free Agent Pool</h3><div class="log">${poolHtml}</div></div></div></div>`;
   }
   return "";
+}
+function closeModal() {
+  const selector = modalReturnFocusSelector;
+  modal = null;
+  modalReturnFocusSelector = null;
+  render();
+  if (selector) {
+    const trigger = document.querySelector(selector);
+    if (trigger && trigger.focus) trigger.focus();
+  }
 }
 function gradeRow(k, v) {
   return `<div class="meter"><span>${k[0].toUpperCase() + k.slice(1)}</span><div class="bar"><i style="width:${v}%"></i></div><b>${v >= 90 ? "Elite" : v >= 80 ? "Plus" : v >= 70 ? "Solid" : v >= 60 ? "Playable" : "Risk"}</b></div>`;
 }
 function findPlayer(id) {
-  const offRookies =
-    S.offseason && S.offseason.rookieClass ? S.offseason.rookieClass : [];
-  return S.roster
-    .concat(allLeaguePlayers())
-    .concat(waiverPool())
-    .concat(offRookies)
-    .find((p) => p.id === id);
+  if (!_playerMap) {
+    const offRookies = S.offseason && S.offseason.rookieClass ? S.offseason.rookieClass : [];
+    _playerMap = new Map(
+      S.roster
+        .concat(allLeaguePlayers())
+        .concat(waiverPool())
+        .concat(offRookies)
+        .map((player) => [player.id, player]),
+    );
+  }
+  return _playerMap.get(id);
 }
 function bind() {
-  document.querySelectorAll("[data-tab]").forEach(
-    (b) =>
-      (b.onclick = () => {
-        tab = b.dataset.tab;
-        render();
-      }),
-  );
-  document
-    .querySelectorAll("[data-action]")
-    .forEach((b) => (b.onclick = () => actions(b.dataset.action)));
-  document.querySelectorAll("[data-filter]").forEach(
-    (el) =>
-      (el.oninput = () => {
-        draftFilters[el.dataset.filter] = el.value;
-        render();
-      }),
-  );
-  document.querySelectorAll("[data-view]").forEach(
-    (b) =>
-      (b.onclick = () => {
-        modal = { type: "player", id: b.dataset.view };
-        render();
-      }),
-  );
-  document.querySelectorAll("[data-teamview]").forEach(
-    (b) =>
-      (b.onclick = () => {
-        modal = { type: "team", id: b.dataset.teamview };
-        render();
-      }),
-  );
-  document.querySelectorAll("[data-close]").forEach(
-    (b) =>
-      (b.onclick = () => {
-        modal = null;
-        render();
-      }),
-  );
-  document
-    .querySelectorAll("[data-draft]")
-    .forEach((b) => (b.onclick = () => draftPlayer(b.dataset.draft)));
-  document
-    .querySelectorAll("[data-pick-rookie]")
-    .forEach((b) => (b.onclick = () => userPickRookie(b.dataset.pickRookie)));
-  document
-    .querySelectorAll("[data-rm-rookie]")
-    .forEach((b) => (b.onclick = () => removeCustomRookie(b.dataset.rmRookie)));
-  document
-    .querySelectorAll("[data-focus]")
-    .forEach((b) => (b.onclick = () => setWeeklyFocus(b.dataset.focus)));
-  document
-    .querySelectorAll("[data-scout]")
-    .forEach((b) => (b.onclick = () => scoutGame(b.dataset.scout)));
-  document.querySelectorAll("[data-plan]").forEach(
-    (b) =>
-      (b.onclick = () => {
-        const [gid, plan] = b.dataset.plan.split("|");
-        setGamePlan(gid, plan === "none" ? null : plan);
-      }),
-  );
-  document
-    .querySelectorAll("[data-press]")
-    .forEach((b) => (b.onclick = () => respondToPress(b.dataset.press)));
-  document
-    .querySelectorAll("[data-hire-open]")
-    .forEach((b) => (b.onclick = () => openHireModal(b.dataset.hireOpen)));
-  document.querySelectorAll("[data-hire-coach]").forEach(
-    (b) =>
-      (b.onclick = () => {
-        const [role, id] = b.dataset.hireCoach.split("|");
-        hireCoach(role, id);
-      }),
-  );
-  document
-    .querySelectorAll("[data-waive]")
-    .forEach((b) => (b.onclick = () => waivePlayer(b.dataset.waive)));
-  document
-    .querySelectorAll("[data-sign]")
-    .forEach((b) => (b.onclick = () => signPlayer(b.dataset.sign)));
-  const city = document.getElementById("citySelect");
-  if (city) city.onchange = () => applyCity(+city.value);
-  document
-    .querySelectorAll("[data-citytile]")
-    .forEach((t) => (t.onclick = () => applyCity(+t.dataset.citytile)));
-  ["nickInput", "arenaInput"].forEach((id) => {
-    const el = document.getElementById(id);
-    if (el)
-      el.oninput = () => {
-        S.team.nickname = document.getElementById("nickInput").value;
-        S.team.arena = document.getElementById("arenaInput").value;
-        S.team.abbr = abbr(S.team.city, S.team.nickname);
-        save();
-      };
+  document.querySelectorAll(".field").forEach((field, index) => {
+    const label = field.querySelector("label");
+    const control = field.querySelector("input, select, textarea");
+    if (!label || !control) return;
+    if (!control.id) control.id = `field-${tab}-${index}`;
+    label.htmlFor = control.id;
   });
-  ["primaryInput", "secondaryInput"].forEach((id) => {
-    const el = document.getElementById(id);
-    if (el)
-      el.oninput = () => {
-        S.team.primary = document.getElementById("primaryInput").value;
-        S.team.secondary = document.getElementById("secondaryInput").value;
-        document.documentElement.style.setProperty("--user1", S.team.primary);
-        document.documentElement.style.setProperty("--user2", S.team.secondary);
-        save();
-      };
+  const filterLabels = {
+    q: "Search expansion players",
+    strength: "Filter by strength",
+    pos: "Filter by position",
+    team: "Filter by current team",
+    arch: "Filter by archetype",
+    risk: "Filter by risk profile",
+  };
+  document.querySelectorAll("[data-filter]").forEach((control) => {
+    control.setAttribute("aria-label", filterLabels[control.dataset.filter] || "Filter players");
   });
-  const tt = document.querySelector("[data-trade-team]");
-  if (tt)
-    tt.onchange = () => {
-      trade.team = tt.value;
+  bindDelegatedEvents();
+}
+function bindDelegatedEvents() {
+  const appRoot = root();
+  if (appRoot.dataset.eventsBound) return;
+  appRoot.dataset.eventsBound = "true";
+  appRoot.addEventListener("click", (event) => {
+    const target = event.target.closest(
+      "button, [data-tab], [data-action], [data-teamview], [data-modal-shade]",
+    );
+    if (!target || target.disabled) return;
+    if (target.matches("[data-modal-shade]")) {
+      if (event.target === target) closeModal();
+      return;
+    }
+    if (target.dataset.tab) {
+      tab = target.dataset.tab;
+      render();
+    } else if (target.dataset.action) actions(target.dataset.action);
+    else if (target.dataset.view) {
+      modalReturnFocusSelector = `[data-view="${CSS.escape(target.dataset.view)}"]`;
+      modal = { type: "player", id: target.dataset.view };
+      render();
+    } else if (target.dataset.teamview) {
+      modalReturnFocusSelector = `[data-teamview="${CSS.escape(target.dataset.teamview)}"]`;
+      modal = { type: "team", id: target.dataset.teamview };
+      render();
+    } else if (target.dataset.close !== undefined) closeModal();
+    else if (target.dataset.draft) draftPlayer(target.dataset.draft);
+    else if (target.dataset.pickRookie) userPickRookie(target.dataset.pickRookie);
+    else if (target.dataset.rmRookie) removeCustomRookie(target.dataset.rmRookie);
+    else if (target.dataset.focus) setWeeklyFocus(target.dataset.focus);
+    else if (target.dataset.scout) scoutGame(target.dataset.scout);
+    else if (target.dataset.plan) {
+      const [gameId, plan] = target.dataset.plan.split("|");
+      setGamePlan(gameId, plan === "none" ? null : plan);
+    } else if (target.dataset.press) respondToPress(target.dataset.press);
+    else if (target.dataset.hireOpen) {
+      modalReturnFocusSelector = `[data-hire-open="${CSS.escape(target.dataset.hireOpen)}"]`;
+      openHireModal(target.dataset.hireOpen);
+    } else if (target.dataset.hireCoach) {
+      const [role, id] = target.dataset.hireCoach.split("|");
+      hireCoach(role, id);
+    } else if (target.dataset.waive) waivePlayer(target.dataset.waive);
+    else if (target.dataset.sign) signPlayer(target.dataset.sign);
+    else if (target.dataset.loadSlot) loadSaveSlot(target.dataset.loadSlot);
+    else if (target.dataset.deleteSlot) deleteSaveSlot(target.dataset.deleteSlot);
+    else if (target.dataset.citytile) applyCity(+target.dataset.citytile);
+  });
+  appRoot.addEventListener("input", (event) => {
+    const control = event.target;
+    if (control.dataset.filter) {
+      draftFilters[control.dataset.filter] = control.value;
+      renderView();
+    } else if (control.dataset.tradeQuery !== undefined) {
+      trade.query = control.value;
+      renderView();
+    } else if (control.id === "nickInput" || control.id === "arenaInput") {
+      const nick = document.getElementById("nickInput");
+      const arena = document.getElementById("arenaInput");
+      if (nick) S.team.nickname = nick.value;
+      if (arena) S.team.arena = arena.value;
+      S.team.abbr = abbr(S.team.city, S.team.nickname);
+      save();
+    } else if (control.id === "primaryInput" || control.id === "secondaryInput") {
+      const primary = document.getElementById("primaryInput");
+      const secondary = document.getElementById("secondaryInput");
+      if (primary) S.team.primary = primary.value;
+      if (secondary) S.team.secondary = secondary.value;
+      document.documentElement.style.setProperty("--user1", S.team.primary);
+      document.documentElement.style.setProperty("--user2", S.team.secondary);
+      document.documentElement.style.setProperty("--userText", contrastText(S.team.primary));
+      save();
+    }
+  });
+  appRoot.addEventListener("change", (event) => {
+    const control = event.target;
+    if (control.id === "citySelect") applyCity(+control.value);
+    else if (control.dataset.tradeTeam !== undefined) {
+      trade.team = control.value;
       trade.userGive = [];
       trade.otherGive = [];
-      render();
-    };
-  const tq = document.querySelector("[data-trade-query]");
-  if (tq)
-    tq.oninput = () => {
-      trade.query = tq.value;
-      render();
-    };
-  document.querySelectorAll("[data-trade-side]").forEach(
-    (cb) =>
-      (cb.onchange = () => {
-        const arr = trade[cb.dataset.tradeSide];
-        cb.checked
-          ? arr.push(cb.value)
-          : (trade[cb.dataset.tradeSide] = arr.filter((x) => x !== cb.value));
-        render();
-      }),
-  );
-  document.querySelectorAll("[data-pick]").forEach(
-    (cb) =>
-      (cb.onchange = () => {
-        trade[cb.dataset.pick === "user" ? "userPick" : "otherPick"] =
-          cb.checked ? 1 : 0;
-        render();
-      }),
+      renderView();
+    } else if (control.dataset.tradeSide) {
+      const side = control.dataset.tradeSide;
+      const selected = new Set(trade[side]);
+      if (control.checked) selected.add(control.value);
+      else selected.delete(control.value);
+      trade[side] = Array.from(selected);
+      renderView();
+    } else if (control.dataset.pick) {
+      trade[control.dataset.pick === "user" ? "userPick" : "otherPick"] = control.checked ? 1 : 0;
+      renderView();
+    }
+  });
+  appRoot.addEventListener(
+    "error",
+    (event) => {
+      if (event.target.matches && event.target.matches("[data-portrait-image]"))
+        event.target.style.display = "none";
+    },
+    true,
   );
 }
 function applyCity(i) {
@@ -1999,32 +2360,37 @@ function actions(a) {
     render();
   }
   if (a === "randomize") {
-    const i = Math.floor(Math.random() * DATA.expansionCities.length);
+    const i = Math.floor(random() * DATA.expansionCities.length);
     applyCity(i);
   }
   if (a === "reset") {
     if (confirm("Start over and clear this save?")) {
-      localStorage.removeItem(LS_KEY);
-      S = freshState();
+      const saveName = S.saveName;
+      resetFaBase();
+      S = normalizeSave(freshState());
+      S.saveName = saveName;
+      lastUndo = null;
       tab = "setup";
+      save();
       render();
     }
   }
   if (a === "exportSave") exportSave();
   if (a === "importSave") importSave();
+  if (a === "confirmImport") confirmImport();
+  if (a === "cancelImport") {
+    pendingImport = null;
+    render();
+  }
+  if (a === "createSaveSlot") createSaveSlot();
   if (a === "simNext") simNextGame();
   if (a === "simWeek") simWeek();
   if (a === "simSeason") simSeason();
   if (a === "regenSchedule") {
-    if (
-      confirm("Regenerate the season schedule and clear simulated results?")
-    ) {
+    if (confirm("Regenerate the season schedule and clear simulated results?")) {
       S.season = null;
       ensureSeason(true);
-      addLog(
-        "Schedule regenerated",
-        "League office issued a fresh expansion-season schedule.",
-      );
+      addLog("Schedule regenerated", "League office issued a fresh expansion-season schedule.");
       render();
     }
   }
@@ -2065,54 +2431,61 @@ function actions(a) {
   if (a === "openAwards") openAwards();
   if (a === "acceptAwards") acceptAwards();
   if (a === "closeAwards") closeAwards();
+  if (a === "undo") undoLastMove();
 }
 function draftPlayer(id) {
+  if (S.phase !== "Expansion Build")
+    return toast("The expansion draft is closed for this franchise.");
   const team = S.teams.find((t) => t.players.some((p) => p.id === id));
   const p = team?.players.find((p) => p.id === id);
   if (!p) return;
   if (p.protected)
-    return toast(
-      "That player is protected. Use the trade desk if you want to chase a core asset.",
-    );
-  if (S.roster.length >= DATA.expansionPickLimit)
-    return toast("Expansion draft limit reached.");
+    return toast("That player is protected. Use the trade desk if you want to chase a core asset.");
+  if (S.roster.length >= DATA.expansionPickLimit) return toast("Expansion draft limit reached.");
   if (userSalary() + p.salary > DATA.cap) return toast("Not enough cap room.");
+  recordUndo("draft pick");
   team.players = team.players.filter((x) => x.id !== id);
   p.team = S.team.abbr;
   S.roster.push(p);
-  addLog(
-    "Expansion pick submitted",
-    `${S.team.nickname} selected ${p.name} from ${team.name}.`,
-  );
+  addLog("Expansion pick submitted", `${S.team.nickname} selected ${p.name} from ${team.name}.`);
   toast(`${p.name} drafted.`);
   render();
 }
 function waivePlayer(id) {
   const p = S.roster.find((x) => x.id === id);
   if (!p) return;
+  recordUndo("waiver move");
   S.roster = S.roster.filter((x) => x.id !== id);
   S.waived.push(p);
-  addLog(
-    "Player waived",
-    `${p.name} was waived, clearing ${shortMoney(p.salary)} in cap.`,
-  );
+  addLog("Player waived", `${p.name} was waived, clearing ${shortMoney(p.salary)} in cap.`);
   render();
 }
 function signPlayer(id) {
+  if (S.roster.some((player) => player.id === id))
+    return toast("That player is already on your roster.");
   let p = waiverPool().find((x) => x.id === id);
   if (!p) return;
   if (S.roster.length >= DATA.rosterMax) return toast("Roster is full.");
   if (userSalary() + p.salary > DATA.cap) return toast("Not enough cap room.");
+  recordUndo("free-agent signing");
   S.waived = S.waived.filter((x) => x.id !== id);
+  S.freeAgents = (S.freeAgents || []).filter((x) => x.id !== id);
+  p = clone(p);
   p.team = S.team.abbr;
+  p.injury = null;
   S.roster.push(p);
   addLog("Waiver signing", `${p.name} signed a one-year deal.`);
   render();
 }
 function submitTrade() {
+  if (S.teams.length && !S.teams.some((team) => team.id === trade.team)) trade.team = S.teams[0].id;
   const other = S.teams.find((t) => t.id === trade.team);
+  if (!other) return toast("No trade partner available.");
   const ev = evaluateTrade(other);
   if (!ev.ok) return toast(ev.reason || "Trade rejected.");
+  if ((trade.userPick && S.picks.you < 1) || (trade.otherPick && S.picks.league < 1))
+    return toast("The selected draft pick is no longer available.");
+  recordUndo("trade");
   const give = S.roster.filter((p) => trade.userGive.includes(p.id));
   const get = other.players.filter((p) => trade.otherGive.includes(p.id));
   // Preserve each player's protected status across the trade. Forcing it to false
@@ -2145,27 +2518,25 @@ function submitTrade() {
 }
 function addLog(title, body) {
   S.log.unshift({ title, body, when: `Week ${S.week}` });
+  if (S.log.length > 80) S.log.length = 80;
 }
 function marketChurn() {
   S.teams.forEach((t) =>
     t.players.forEach((p) => {
-      p.mood = Math.max(
-        20,
-        Math.min(99, p.mood + Math.floor(Math.random() * 11) - 5),
-      );
+      p.mood = Math.max(20, Math.min(99, (p.mood || 60) + Math.floor(random() * 11) - 5));
     }),
   );
 }
 
 // =================== OFFSEASON: aging + rookie draft =====================
 function pickOne(arr) {
-  return arr[Math.floor(Math.random() * arr.length)];
+  return arr[Math.floor(random() * arr.length)];
 }
 function pickN(arr, n) {
   const copy = arr.slice(),
     out = [];
   while (out.length < n && copy.length) {
-    out.push(copy.splice(Math.floor(Math.random() * copy.length), 1)[0]);
+    out.push(copy.splice(Math.floor(random() * copy.length), 1)[0]);
   }
   return out;
 }
@@ -2182,6 +2553,7 @@ const AGING_RATINGS = [
   "iq",
 ];
 function ageOnePlayer(p) {
+  _compCache.delete(p);
   const before = composite(p);
   const delta = p.ratings.potential - before;
   const deltas = {};
@@ -2216,7 +2588,36 @@ function ageOnePlayer(p) {
     }
   }
   p.years = Math.max(0, p.years - 1);
+  _compCache.delete(p);
   return { name: p.name, team: p.team, before, after: composite(p), deltas };
+}
+function resolveExpiredContracts() {
+  const expiredUser = S.roster.filter((player) => player.years <= 0);
+  const waivedIds = new Set(S.waived.map((player) => player.id));
+  expiredUser.forEach((player) => {
+    if (!waivedIds.has(player.id)) S.waived.push(player);
+  });
+  S.roster = S.roster.filter((player) => player.years > 0);
+  if (!Array.isArray(S.freeAgents)) S.freeAgents = [];
+  const known = new Set([
+    ...S.roster.map((player) => player.id),
+    ...S.waived.map((player) => player.id),
+    ...S.freeAgents.map((player) => player.id),
+  ]);
+  let expiredLeague = 0;
+  S.teams.forEach((team) => {
+    const expired = team.players.filter((player) => player.years <= 0);
+    expired.forEach((player) => {
+      if (known.has(player.id)) return;
+      player.team = "FA";
+      S.freeAgents.push(player);
+      known.add(player.id);
+    });
+    const before = team.players.length;
+    team.players = team.players.filter((player) => player.years > 0);
+    expiredLeague += before - team.players.length;
+  });
+  return { user: expiredUser, leagueCount: expiredLeague };
 }
 function applyOffseasonAging() {
   const reports = [];
@@ -2364,9 +2765,7 @@ function generateRookieClass(year) {
       const ratings = {
         scoring: clampRating(base + rand(-8, 10)),
         shooting: clampRating(base + rand(-12, 8) - (isC ? 8 : 0)),
-        playmaking: clampRating(
-          base + rand(-15, 8) - (isC ? 10 : 0) + (isG ? 6 : 0),
-        ),
+        playmaking: clampRating(base + rand(-15, 8) - (isC ? 10 : 0) + (isG ? 6 : 0)),
         defense: clampRating(base + rand(-12, 10)),
         rebounding: clampRating(base + rand(-15, 12) + (isC ? 10 : 0)),
         athleticism: clampRating(base + rand(-5, 12)),
@@ -2374,9 +2773,7 @@ function generateRookieClass(year) {
         potential: pot,
       };
       const salary =
-        200000 +
-        (t.arch === "star" ? 500000 : t.arch === "starter" ? 250000 : 0) +
-        rand(0, 80000);
+        200000 + (t.arch === "star" ? 500000 : t.arch === "starter" ? 250000 : 0) + rand(0, 80000);
       out.push({
         id: `rookie-${year}-${pickNo++}`,
         name,
@@ -2390,7 +2787,7 @@ function generateRookieClass(year) {
         protected: false,
         ratings,
         archetype: t.arch,
-        mood: 60 + Math.floor(Math.random() * 25),
+        mood: 60 + Math.floor(random() * 25),
         injury: null,
       });
     }
@@ -2404,8 +2801,7 @@ function rookieScout(arch, pos) {
     return "Pro-ready guard with multi-year starter projection.";
   if (arch === "starter" && pos.includes("C"))
     return "Refined interior player with starting big projection.";
-  if (arch === "starter")
-    return "Versatile forward with starting-caliber tools.";
+  if (arch === "starter") return "Versatile forward with starting-caliber tools.";
   return "Developmental prospect with carve-out role upside.";
 }
 const RATING_LABELS_HIGH = {
@@ -2447,20 +2843,14 @@ function enterOffseason() {
     return toast("Finish all games before advancing to the offseason.");
   }
   const reports = applyOffseasonAging();
+  S.phase = `${S.year} Offseason`;
+  const expirations = resolveExpiredContracts();
   const upcomingYear = S.year + 1;
-  const base =
-    S.year === 2026
-      ? clone(DATA.rookieClass2027)
-      : generateRookieClass(upcomingYear);
-  const dataExtras =
-    (DATA.rookieClassExtras && DATA.rookieClassExtras[upcomingYear]) || [];
+  const base = S.year === 2026 ? clone(DATA.rookieClass2027) : generateRookieClass(upcomingYear);
+  const dataExtras = (DATA.rookieClassExtras && DATA.rookieClassExtras[upcomingYear]) || [];
   const userExtras = (S.customRookies && S.customRookies[upcomingYear]) || [];
   const rookieClass = base.concat(clone(dataExtras)).concat(clone(userExtras));
-  const draftOrder = standingsRows()
-    .slice()
-    .reverse()
-    .map((r) => r.id)
-    .slice(0, rookieClass.length);
+  const draftOrder = buildDraftOrder(rookieClass.length);
   S.offseason = {
     stage: "aging",
     agingReport: reports,
@@ -2468,6 +2858,7 @@ function enterOffseason() {
     draftOrder,
     picks: [],
     currentPickIdx: 0,
+    expirations,
   };
   tab = "offseason";
   addLog(
@@ -2483,6 +2874,32 @@ function advanceToDraft() {
   save();
   render();
   setTimeout(processAiPicks, 250);
+}
+function buildDraftOrder(classSize) {
+  const base = standingsRows()
+    .slice()
+    .reverse()
+    .map((row) => row.id);
+  const extras = [];
+  const order = [];
+  for (const id of base) {
+    if (id === S.team.abbr) {
+      const owned = Math.max(0, S.picks.you);
+      if (owned > 0) order.push(id);
+      for (let i = 1; i < owned; i++) extras.push(id);
+    } else {
+      order.push(id);
+    }
+  }
+  return order.concat(extras).slice(0, classSize);
+}
+function resumeOffseasonDraft() {
+  if (!S.offseason || S.offseason.stage !== "draft") return;
+  const onClock = S.offseason.draftOrder[S.offseason.currentPickIdx];
+  if (onClock && onClock !== S.team.abbr) processAiPicks();
+}
+function seedOffseason(os) {
+  S.offseason = os;
 }
 function processAiPicks() {
   if (!S.offseason || S.offseason.stage !== "draft") return;
@@ -2525,17 +2942,18 @@ function aiPickRookie(teamId, available) {
     .slice()
     .sort(
       (a, b) =>
-        composite(b) +
-        b.ratings.potential * 0.6 -
-        (composite(a) + a.ratings.potential * 0.6),
+        composite(b) + b.ratings.potential * 0.6 - (composite(a) + a.ratings.potential * 0.6),
     )[0];
 }
 function userPickRookie(playerId) {
   if (!S.offseason || S.offseason.stage !== "draft") return;
   if (S.offseason.draftOrder[S.offseason.currentPickIdx] !== S.team.abbr)
     return toast("Not your pick.");
+  if (S.roster.length >= DATA.rosterMax)
+    return toast(`Roster limit reached. Waive a player before making this pick.`);
   const p = S.offseason.rookieClass.find((x) => x.id === playerId);
   if (!p || S.offseason.picks.some((pk) => pk.playerId === playerId)) return;
+  recordUndo("rookie selection");
   S.offseason.picks.push({
     team: S.team.abbr,
     playerId: p.id,
@@ -2557,8 +2975,12 @@ function userPickRookie(playerId) {
 }
 function startNextSeason() {
   if (!S.offseason || S.offseason.stage !== "done") return;
+  if (!requireOpeningNightReady())
+    return toast("Resolve roster and cap requirements before starting the season.");
   S.year++;
+  S.phase = `${S.year} Regular Season`;
   S.season = null;
+  clearAllInjuries();
   ensureSeason(true);
   S.offseason = null;
   tab = "schedule";
@@ -2578,8 +3000,7 @@ function offseasonView() {
 function offseasonAgingView() {
   const userReports = S.offseason.agingReport.filter((r) => r.isUser);
   const sortByImpact = (r) =>
-    Math.abs(r.after - r.before) +
-    Object.values(r.deltas).reduce((s, v) => s + Math.abs(v), 0);
+    Math.abs(r.after - r.before) + Object.values(r.deltas).reduce((s, v) => s + Math.abs(v), 0);
   const leagueChangers = S.offseason.agingReport
     .filter((r) => !r.isUser)
     .slice()
@@ -2596,9 +3017,13 @@ function offseasonAgingView() {
     const ds = Object.entries(r.deltas)
       .map(([k, v]) => `<span class="tag">${k} ${v > 0 ? "+" + v : v}</span>`)
       .join("");
-    return `<tr><td><b>${r.name}</b></td><td><span class="pill">${r.team}</span></td><td>${arrow}</td><td>${ds || '<span class="mini">no change</span>'}</td></tr>`;
+    return `<tr><td><b>${escapeHtml(r.name)}</b></td><td><span class="pill">${escapeHtml(r.team)}</span></td><td>${arrow}</td><td>${ds || '<span class="mini">no change</span>'}</td></tr>`;
   };
-  return `<section class="card"><div class="sectionTitle"><h3>Year ${S.year} · Offseason Aging Report</h3><span>Year ${S.year + 1} rookie class is next</span></div><div class="cardPad"><h3>Your Roster</h3><table class="table"><thead><tr><th>Player</th><th>Team</th><th>Composite</th><th>Notable shifts</th></tr></thead><tbody>${userReports.map(row).join("") || '<tr><td colspan="4"><div class="empty">No roster players to age.</div></td></tr>'}</tbody></table><h3 style="margin-top:18px">Notable League Changes</h3><table class="table"><thead><tr><th>Player</th><th>Team</th><th>Composite</th><th>Notable shifts</th></tr></thead><tbody>${leagueChangers.map(row).join("")}</tbody></table><div class="actions" style="margin-top:18px"><button class="btn" data-action="advanceToDraft">Continue to Rookie Draft</button></div></div></section>`;
+  const expired = (S.offseason.expirations && S.offseason.expirations.user) || [];
+  const expirationBlock = expired.length
+    ? `<div class="callout" style="margin-bottom:18px"><b>${expired.length} contract(s) expired</b><p class="muted">${expired.map((player) => escapeHtml(player.name)).join(", ")} moved to Waivers / Free Agency. Re-sign them there or replace them before next season.</p><button class="btn secondary" data-tab="waivers">Open Free Agency</button></div>`
+    : "";
+  return `<section class="card"><div class="sectionTitle"><h3>Year ${S.year} · Offseason Aging Report</h3><span>Year ${S.year + 1} rookie class is next</span></div><div class="cardPad">${expirationBlock}<h3>Your Roster</h3><table class="table"><thead><tr><th>Player</th><th>Team</th><th>Composite</th><th>Notable shifts</th></tr></thead><tbody>${userReports.map(row).join("") || '<tr><td colspan="4"><div class="empty">No roster players to age.</div></td></tr>'}</tbody></table><h3 style="margin-top:18px">Notable League Changes</h3><table class="table"><thead><tr><th>Player</th><th>Team</th><th>Composite</th><th>Notable shifts</th></tr></thead><tbody>${leagueChangers.map(row).join("")}</tbody></table><div class="actions" style="margin-top:18px"><button class="btn" data-action="advanceToDraft">Continue to Rookie Draft</button></div></div></section>`;
 }
 function offseasonDraftView() {
   const os = S.offseason;
@@ -2620,9 +3045,7 @@ function offseasonDraftView() {
     .filter((p) => !pickedIds.has(p.id))
     .sort(
       (a, b) =>
-        composite(b) +
-        b.ratings.potential * 0.5 -
-        (composite(a) + a.ratings.potential * 0.5),
+        composite(b) + b.ratings.potential * 0.5 - (composite(a) + a.ratings.potential * 0.5),
     );
   const orderHtml = os.draftOrder
     .map((id, i) => {
@@ -2634,39 +3057,39 @@ function offseasonDraftView() {
               name: id,
               primary: "#888",
             };
-      const player = picked
-        ? os.rookieClass.find((p) => p.id === picked.playerId)
-        : null;
+      const player = picked ? os.rookieClass.find((p) => p.id === picked.playerId) : null;
       const isUser = id === S.team.abbr;
-      return `<div class="logItem" style="${i === os.currentPickIdx ? "border-color:var(--orange);background:#fff6ee" : ""}${isUser && !picked ? ";box-shadow:inset 4px 0 0 var(--orange)" : ""}"><b>Pick #${i + 1}</b> <span class="teamBadge" style="background:${meta.primary}">${id}</span> ${escapeHtml(meta.name)}${isUser ? ' <span class="pill good">YOU</span>' : ""}${player ? `<div class="mini">→ ${escapeHtml(player.name)} · ${escapeHtml(player.pos)} · ${escapeHtml(player.team)}</div>` : i === os.currentPickIdx ? '<div class="mini">on the clock</div>' : '<div class="mini">upcoming</div>'}</div>`;
+      return `<div class="logItem" style="${i === os.currentPickIdx ? "border-color:var(--orange);background:#fff6ee" : ""}${isUser && !picked ? ";box-shadow:inset 4px 0 0 var(--orange)" : ""}"><b>Pick #${i + 1}</b> <span class="teamBadge" style="${badgeStyle(meta.primary)}">${id}</span> ${escapeHtml(meta.name)}${isUser ? ' <span class="pill good">YOU</span>' : ""}${player ? `<div class="mini">→ ${escapeHtml(player.name)} · ${escapeHtml(player.pos)} · ${escapeHtml(player.team)}</div>` : i === os.currentPickIdx ? '<div class="mini">on the clock</div>' : '<div class="mini">upcoming</div>'}</div>`;
     })
     .join("");
   const board = available
     .map((p) => {
       const photo = portraitHtml(p);
-      return `<div class="playerCard">${photo}<div><div><span class="playerName">${escapeHtml(p.name)}</span> <span class="pill">${escapeHtml(p.pos)}</span> <span class="pill">${escapeHtml(p.team)}</span></div><div class="scout">${escapeHtml(p.scouting)}</div><div class="tags"><span class="tag">${visibleGrade(p)}</span><span class="tag">Upside ${p.ratings.potential}</span><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${escapeHtml(p.strengths.split(",")[0])}</span></div></div><div class="actions"><button class="btn secondary" data-view="${p.id}">Scout</button><button class="btn ${userOnClock ? "" : "secondary"}" ${userOnClock ? "" : "disabled"} data-pick-rookie="${p.id}">${userOnClock ? "Draft" : "Wait"}</button></div></div>`;
+      return `<div class="playerCard">${photo}<div><div><span class="playerName">${escapeHtml(p.name)}</span> <span class="pill">${escapeHtml(p.pos)}</span> <span class="pill">${escapeHtml(p.team)}</span></div><div class="scout">${escapeHtml(p.scouting)}</div><div class="tags"><span class="tag">${visibleGrade(p)}</span><span class="tag">Upside ${p.ratings.potential}</span><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${escapeHtml(firstTag(p.strengths))}</span></div></div><div class="actions"><button class="btn secondary" data-view="${escapeAttr(p.id)}">Scout</button><button class="btn ${userOnClock ? "" : "secondary"}" ${userOnClock ? "" : "disabled"} data-pick-rookie="${escapeAttr(p.id)}">${userOnClock ? "Draft" : "Wait"}</button></div></div>`;
     })
     .join("");
-  return `<section class="card"><div class="sectionTitle"><h3>Rookie Draft · Year ${S.year + 1} Class</h3><span>${os.picks.length}/${os.draftOrder.length} picks made</span></div><div class="layout2"><div><div class="sectionTitle"><h3>On the Clock</h3><span><span class="teamBadge" style="background:${onClockMeta.primary}">${onClock}</span>${onClockMeta.name}${userOnClock ? " · YOUR PICK" : ""}</span></div><div class="board" style="max-height:720px">${board || '<div class="empty">Draft complete.</div>'}</div></div><div><div class="sectionTitle"><h3>Draft Order</h3><span>worst → best</span></div><div class="cardPad log" style="max-height:720px;overflow:auto">${orderHtml}</div></div></div></section>`;
+  return `<section class="card"><div class="sectionTitle"><h3>Rookie Draft · Year ${S.year + 1} Class</h3><span>${os.picks.length}/${os.draftOrder.length} picks made</span></div><div class="layout2"><div><div class="sectionTitle"><h3>On the Clock</h3><span><span class="teamBadge" style="${badgeStyle(onClockMeta.primary)}">${escapeHtml(onClock)}</span>${escapeHtml(onClockMeta.name)}${userOnClock ? " · YOUR PICK" : ""}</span></div><div class="board" style="max-height:720px">${board || '<div class="empty">Draft complete.</div>'}</div></div><div><div class="sectionTitle"><h3>Draft Order</h3><span>worst → best</span></div><div class="cardPad log" style="max-height:720px;overflow:auto">${orderHtml}</div></div></div></section>`;
 }
 function offseasonDoneView() {
   const os = S.offseason;
   const userPick = os.picks.find((p) => p.team === S.team.abbr);
-  const userRookie = userPick
-    ? os.rookieClass.find((r) => r.id === userPick.playerId)
-    : null;
+  const userRookie = userPick ? os.rookieClass.find((r) => r.id === userPick.playerId) : null;
   const top5 = os.picks
     .slice()
     .sort((a, b) => a.pickNo - b.pickNo)
     .slice(0, 5);
-  return `<section class="card"><div class="sectionTitle"><h3>Year ${S.year} Offseason Complete</h3><span>${os.picks.length} rookies drafted league-wide</span></div><div class="cardPad"><div class="logItem"><b>Your selection</b><p class="muted">${userRookie ? `You took ${userRookie.name} (${userRookie.pos}, ${userRookie.team}) at pick #${userPick.pickNo}. Welcome to the franchise.` : "You did not have a pick in this draft (you finished in the top 2 last season)."}</p></div><h3>Top 5 picks recap</h3><div class="log">${top5
+  const readiness = rosterReadiness();
+  const readinessBlock = readiness.ready
+    ? '<div class="callout"><b>Opening-night roster ready.</b></div>'
+    : `<div class="callout"><b>Roster work remains</b><p class="muted">Resolve ${escapeHtml(readiness.issues.join(" and "))} through Waivers, Trades, or roster moves.</p><div class="actions"><button class="btn secondary" data-tab="waivers">Free Agency</button><button class="btn secondary" data-tab="trades">Trade Desk</button><button class="btn secondary" data-tab="roster">Roster</button></div></div>`;
+  return `<section class="card"><div class="sectionTitle"><h3>Year ${S.year} Offseason Complete</h3><span>${os.picks.length} rookies drafted league-wide</span></div><div class="cardPad"><div class="logItem"><b>Your selection</b><p class="muted">${userRookie ? `You took ${escapeHtml(userRookie.name)} (${escapeHtml(userRookie.pos)}, ${escapeHtml(userRookie.team)}) at pick #${userPick.pickNo}. Welcome to the franchise.` : "You did not have a pick in this draft."}</p></div><h3>Top 5 picks recap</h3><div class="log">${top5
     .map((pk) => {
       const r = os.rookieClass.find((x) => x.id === pk.playerId);
       return `<div class="logItem"><b>#${pk.pickNo} · ${escapeHtml(pk.team)}</b><div class="mini">${escapeHtml(r.name)} · ${escapeHtml(r.pos)} · ${escapeHtml(r.team)} · ${visibleGrade(r)}</div></div>`;
     })
     .join(
       "",
-    )}</div><div class="actions" style="margin-top:18px"><button class="btn" data-action="startNextSeason">Start ${S.year + 1} Season</button></div></div></section>`;
+    )}</div>${readinessBlock}<div class="actions" style="margin-top:18px"><button class="btn" data-action="startNextSeason" ${readiness.ready ? "" : "disabled"}>Start ${S.year + 1} Season</button></div></div></section>`;
 }
 
 // =================== PLAYOFFS: bracket + series + sim =====================
@@ -2707,9 +3130,10 @@ function makeSeries(id, round, bestOf, top, bot, topSeed, botSeed) {
 }
 function enterPlayoffs() {
   if (!S.season) return toast("No regular season to seed from.");
+  if (S.season.schedule.some((game) => !game.played))
+    return toast("Finish the regular season before entering the playoffs.");
   const standings = standingsRows();
-  if (standings.length < 8)
-    return toast("Need at least 8 teams to run a playoff.");
+  if (standings.length < 8) return toast("Need at least 8 teams to run a playoff.");
   const top8 = standings.slice(0, 8);
   const pairs = [
     [0, 7],
@@ -2718,15 +3142,7 @@ function enterPlayoffs() {
     [2, 5],
   ];
   const r1 = pairs.map((p, i) =>
-    makeSeries(
-      `R1-${i + 1}`,
-      1,
-      3,
-      top8[p[0]].id,
-      top8[p[1]].id,
-      p[0] + 1,
-      p[1] + 1,
-    ),
+    makeSeries(`R1-${i + 1}`, 1, 3, top8[p[0]].id, top8[p[1]].id, p[0] + 1, p[1] + 1),
   );
   S.playoffs = {
     active: true,
@@ -2740,11 +3156,9 @@ function enterPlayoffs() {
     complete: false,
     seedMap: Object.fromEntries(top8.map((t, i) => [t.id, i + 1])),
   };
+  S.phase = `${S.year} Playoffs`;
   tab = "schedule";
-  addLog(
-    "Playoffs",
-    `${S.year} regular season closed. Top 8 seeded. Round 1 underway.`,
-  );
+  addLog("Playoffs", `${S.year} regular season closed. Top 8 seeded. Round 1 underway.`);
   save();
   render();
 }
@@ -2785,10 +3199,7 @@ function advancePlayoffRound() {
     S.playoffs.champion = cur.series[0].winner;
     S.playoffs.complete = true;
     S.pendingAwards = computeAwards();
-    addLog(
-      "Champion",
-      `${teamMeta(S.playoffs.champion).name} are the ${S.year} champions.`,
-    );
+    addLog("Champion", `${teamMeta(S.playoffs.champion).name} are the ${S.year} champions.`);
     save();
     return;
   }
@@ -2807,10 +3218,7 @@ function advancePlayoffRound() {
     const w4 = cur.series.find((s) => s.id === "R1-4").winner; // 3v6
     const [a, b, sa, sb] = orderTopBot(w1, w2);
     const [c, d, sc, sd] = orderTopBot(w3, w4);
-    nextR.series = [
-      makeSeries("R2-1", 2, 5, a, b, sa, sb),
-      makeSeries("R2-2", 2, 5, c, d, sc, sd),
-    ];
+    nextR.series = [makeSeries("R2-1", 2, 5, a, b, sa, sb), makeSeries("R2-2", 2, 5, c, d, sc, sd)];
   } else if (S.playoffs.currentRound === 3) {
     const w1 = cur.series.find((s) => s.id === "R2-1").winner;
     const w2 = cur.series.find((s) => s.id === "R2-2").winner;
@@ -2883,10 +3291,9 @@ function playoffsView() {
   const userSeries = cur
     ? cur.series.find((s) => s.top === S.team.abbr || s.bot === S.team.abbr)
     : null;
-  const userEliminated =
-    userSeries && userSeries.winner && userSeries.winner !== S.team.abbr;
+  const userEliminated = userSeries && userSeries.winner && userSeries.winner !== S.team.abbr;
   const heroBlock = S.playoffs.complete
-    ? `<section class="card"><div class="cardPad" style="text-align:center;padding:32px"><div class="mini" style="text-transform:uppercase;letter-spacing:.12em;color:var(--muted);font-weight:800">Champion · ${S.year}</div><h1 style="font-size:48px;margin:10px 0;letter-spacing:-.05em">${teamMeta(S.playoffs.champion).name}</h1><div class="actions" style="justify-content:center;margin-top:18px"><button class="btn" data-action="openAwards" style="font-size:15px;padding:14px 20px">View Season Awards →</button></div></div></section>`
+    ? `<section class="card"><div class="cardPad" style="text-align:center;padding:32px"><div class="mini" style="text-transform:uppercase;letter-spacing:.12em;color:var(--muted);font-weight:800">Champion · ${S.year}</div><h1 style="font-size:48px;margin:10px 0;letter-spacing:-.05em">${escapeHtml(teamMeta(S.playoffs.champion).name)}</h1><div class="actions" style="justify-content:center;margin-top:18px"><button class="btn" data-action="openAwards" style="font-size:15px;padding:14px 20px">View Season Awards →</button></div></div></section>`
     : userGame
       ? `<section class="card"><div class="sectionTitle"><h3>Your Next Playoff Game · Round ${S.playoffs.currentRound}</h3><span>Game ${userGame.gameNum} of ${userSeries.bestOf}</span></div><div class="cardPad"><div class="layout2"><div><b>${userGame.home === S.team.abbr ? "Home" : "Away"} vs ${teamMeta(userGame.home === S.team.abbr ? userGame.away : userGame.home).name}</b><p class="muted">Series: ${userSeries.topWins}-${userSeries.botWins} (${userSeries.top === S.team.abbr ? "you" : teamMeta(userSeries.top).name} lead)</p></div><div class="actions" style="justify-content:flex-end;align-items:flex-end"><button class="btn" data-action="simNextPlayoffGame" style="font-size:15px;padding:14px 18px">Game Day →</button></div></div></div></section>`
       : userEliminated
@@ -2898,11 +3305,11 @@ function playoffsView() {
         ri === 0
           ? "Round 1 (Best of 3)"
           : ri === 1
-            ? "Conference Semis (Best of 5)"
+            ? "Semifinals (Best of 5)"
             : "Finals (Best of 7)";
       const seriesHtml = round.series.length
         ? round.series.map(seriesCard).join("")
-        : `<div class="empty">Pending Round ${ri} winners.</div>`;
+        : `<div class="empty">Pending Round ${ri + 1} winners.</div>`;
       return `<section class="card" style="margin-bottom:14px"><div class="sectionTitle"><h3>${roundLabel}</h3><span>${round.series.filter((s) => s.winner).length}/${round.series.length} series final</span></div><div class="cardPad log">${seriesHtml}</div></section>`;
     })
     .join("");
@@ -2911,7 +3318,6 @@ function playoffsView() {
 function seriesCard(s) {
   const top = teamMeta(s.top);
   const bot = teamMeta(s.bot);
-  const winsNeeded = Math.ceil(s.bestOf / 2);
   const isUser = s.top === S.team.abbr || s.bot === S.team.abbr;
   const winLine = s.winner
     ? `<span class="pill good">${teamMeta(s.winner).name} win ${s.topWins}-${s.botWins}</span>`
@@ -2919,11 +3325,13 @@ function seriesCard(s) {
   const gameLines = s.games
     .map((g) => {
       if (!g.played)
-        return `<div class="mini">G${g.gameNum}: ${teamMeta(g.away).id} @ ${teamMeta(g.home).id} — upcoming</div>`;
-      return `<div class="mini">G${g.gameNum}: ${teamMeta(g.away).id} ${g.awayScore} @ ${teamMeta(g.home).id} ${g.homeScore} · ${teamMeta(g.winner).id} win</div>`;
+        return s.winner
+          ? ""
+          : `<div class="mini">G${g.gameNum}: ${escapeHtml(teamMeta(g.away).id)} @ ${escapeHtml(teamMeta(g.home).id)} — upcoming</div>`;
+      return `<div class="mini">G${g.gameNum}: ${escapeHtml(teamMeta(g.away).id)} ${g.awayScore} @ ${escapeHtml(teamMeta(g.home).id)} ${g.homeScore} · ${escapeHtml(teamMeta(g.winner).id)} win</div>`;
     })
     .join("");
-  return `<div class="logItem" style="${isUser ? "border-color:var(--orange);box-shadow:inset 4px 0 0 var(--orange)" : ""}"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px"><b>(${s.topSeed}) <span class="teamBadge" style="background:${top.primary}">${s.top}</span> ${top.name} vs (${s.botSeed}) <span class="teamBadge" style="background:${bot.primary}">${s.bot}</span> ${bot.name}</b>${winLine}</div><div style="margin-top:8px">${gameLines}</div></div>`;
+  return `<div class="logItem" style="${isUser ? "border-color:var(--orange);box-shadow:inset 4px 0 0 var(--orange)" : ""}"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px"><b>(${s.topSeed}) <span class="teamBadge" style="${badgeStyle(top.primary)}">${escapeHtml(s.top)}</span> ${escapeHtml(top.name)} vs (${s.botSeed}) <span class="teamBadge" style="${badgeStyle(bot.primary)}">${escapeHtml(s.bot)}</span> ${escapeHtml(bot.name)}</b>${winLine}</div><div style="margin-top:8px">${gameLines}</div></div>`;
 }
 
 // =================== AWARDS =====================
@@ -2932,19 +3340,12 @@ function computeAwards() {
     ...S.roster.map((p) => ({ p, teamId: S.team.abbr })),
     ...S.teams.flatMap((t) => t.players.map((pl) => ({ p: pl, teamId: t.id }))),
   ];
-  const withStats = allPlayers.filter(
-    (x) => x.p.seasonStats && x.p.seasonStats.gp > 0,
-  );
+  const withStats = allPlayers.filter((x) => x.p.seasonStats && x.p.seasonStats.gp > 0);
   if (!withStats.length) return null;
   const score = (x) => {
     const s = x.p.seasonStats;
     const gp = Math.max(1, s.gp);
-    return (
-      (s.pts / gp) * 1.0 +
-      (s.reb / gp) * 0.55 +
-      (s.ast / gp) * 0.7 +
-      (s.w / gp) * 8
-    );
+    return (s.pts / gp) * 1.0 + (s.reb / gp) * 0.55 + (s.ast / gp) * 0.7 + (s.w / gp) * 8;
   };
   const ordered = withStats.slice().sort((a, b) => score(b) - score(a));
   const mvp = ordered[0];
@@ -2953,20 +3354,19 @@ function computeAwards() {
     .slice()
     .sort((a, b) => b.p.ratings.defense - a.p.ratings.defense)[0];
   const rookies = withStats.filter((x) => x.p.rookieYear === S.year);
-  const roy = rookies.length
-    ? rookies.slice().sort((a, b) => score(b) - score(a))[0]
-    : null;
+  const roy = rookies.length ? rookies.slice().sort((a, b) => score(b) - score(a))[0] : null;
   const mipPool = withStats.filter(
-    (x) => x.p.compositeAtStart != null && x.p.compositeAtStart > 0,
+    (x) =>
+      x.p.compositeAtStart !== null &&
+      x.p.compositeAtStart !== undefined &&
+      x.p.compositeAtStart > 0 &&
+      composite(x.p) > x.p.compositeAtStart,
   );
   const mip = mipPool.length
     ? mipPool
         .slice()
         .sort(
-          (a, b) =>
-            composite(b.p) -
-            b.p.compositeAtStart -
-            (composite(a.p) - a.p.compositeAtStart),
+          (a, b) => composite(b.p) - b.p.compositeAtStart - (composite(a.p) - a.p.compositeAtStart),
         )[0]
     : null;
   const allLeague = ordered.slice(0, 5);
@@ -2980,6 +3380,44 @@ function computeAwards() {
     allLeague,
   };
 }
+function compactAwardEntry(entry) {
+  if (!entry) return null;
+  if (!entry.p) return clone(entry);
+  return {
+    playerId: entry.p.id,
+    name: entry.p.name,
+    pos: entry.p.pos,
+    teamId: entry.teamId,
+    stats: clone(entry.p.seasonStats || {}),
+    defense: entry.p.ratings.defense,
+    compositeStart: entry.p.compositeAtStart,
+    compositeEnd: composite(entry.p),
+  };
+}
+function compactSeasonAwards(awards) {
+  return {
+    year: awards.year,
+    champion: awards.champion,
+    mvp: compactAwardEntry(awards.mvp),
+    dpoy: compactAwardEntry(awards.dpoy),
+    roy: compactAwardEntry(awards.roy),
+    mip: compactAwardEntry(awards.mip),
+    allLeague: (awards.allLeague || []).map(compactAwardEntry),
+  };
+}
+function historyView() {
+  const seasons = (S.awards || []).slice().sort((a, b) => b.year - a.year);
+  if (!seasons.length)
+    return `<section class="card"><div class="sectionTitle"><h3>Franchise History</h3><span>No completed seasons</span></div><div class="empty">Complete a season and accept its awards to build your permanent history.</div></section>`;
+  const entryName = (entry) =>
+    entry ? escapeHtml(entry.name || (entry.p && entry.p.name) || "—") : "—";
+  return `<section class="card"><div class="sectionTitle"><h3>Franchise History</h3><span>${seasons.length} season(s)</span></div><div class="cardPad log">${seasons
+    .map((season) => {
+      const champion = season.champion ? escapeHtml(teamMeta(season.champion).name) : "—";
+      return `<div class="logItem"><div class="sectionTitle"><h3>${season.year} Season</h3><span>${champion} champions</span></div><div class="layout3 historyAwards"><p><b>MVP</b><br>${entryName(season.mvp)}</p><p><b>DPOY</b><br>${entryName(season.dpoy)}</p><p><b>Rookie of the Year</b><br>${entryName(season.roy)}</p></div></div>`;
+    })
+    .join("")}</div></section>`;
+}
 function awardsView() {
   const a = S.pendingAwards;
   if (!a)
@@ -2991,9 +3429,7 @@ function awardsView() {
     const gp = Math.max(1, s.gp);
     return `<div class="logItem" style="display:flex;gap:14px;align-items:center">${portraitHtml(x.p)}<div style="flex:1"><div class="mini" style="text-transform:uppercase;letter-spacing:.1em;color:var(--muted);font-weight:800">${label}</div><div style="font-size:18px;font-weight:900">${escapeHtml(x.p.name)}</div><div class="mini">${escapeHtml(team)} · ${(s.pts / gp).toFixed(1)} pts · ${(s.reb / gp).toFixed(1)} reb · ${(s.ast / gp).toFixed(1)} ast${extra ? " · " + extra : ""}</div></div></div>`;
   };
-  const mipExtra = a.mip
-    ? `+${composite(a.mip.p) - a.mip.p.compositeAtStart} composite`
-    : null;
+  const mipExtra = a.mip ? `+${composite(a.mip.p) - a.mip.p.compositeAtStart} composite` : null;
   const allLeagueHtml = a.allLeague
     .map((x, i) => {
       const s = x.p.seasonStats;
@@ -3011,7 +3447,7 @@ function openAwards() {
 }
 function acceptAwards() {
   if (S.pendingAwards) {
-    S.awards.push(S.pendingAwards);
+    S.awards.push(compactSeasonAwards(S.pendingAwards));
     S.pendingAwards = null;
   }
   S.playoffs = null;
@@ -3068,20 +3504,39 @@ const FOCUS_OPTIONS = [
 function setWeeklyFocus(id) {
   if (!FOCUS_OPTIONS.some((f) => f.id === id)) return;
   S.coaching.weeklyFocus = id;
-  S.coaching.weeklyFocusWeek = S.week;
+  S.coaching.focusWeek = id === "none" ? null : S.week;
   save();
   render();
 }
+function maybeResetWeeklyFocus(week) {
+  if (
+    S.coaching &&
+    S.coaching.focusWeek !== null &&
+    S.coaching.focusWeek !== undefined &&
+    week > S.coaching.focusWeek &&
+    S.coaching.weeklyFocus !== "none"
+  ) {
+    S.coaching.weeklyFocus = "none";
+    S.coaching.focusWeek = null;
+  }
+}
+function clearAllInjuries() {
+  const clear = (player) => {
+    player.injury = null;
+  };
+  S.roster.forEach(clear);
+  S.waived.forEach(clear);
+  (S.freeAgents || []).forEach(clear);
+  S.teams.forEach((team) => team.players.forEach(clear));
+}
 function scoutGame(gameId) {
-  if (!S.coaching.gamePlans[gameId])
-    S.coaching.gamePlans[gameId] = { scouted: false, plan: null };
+  if (!S.coaching.gamePlans[gameId]) S.coaching.gamePlans[gameId] = { scouted: false, plan: null };
   S.coaching.gamePlans[gameId].scouted = true;
   save();
   render();
 }
 function setGamePlan(gameId, plan) {
-  if (!S.coaching.gamePlans[gameId])
-    S.coaching.gamePlans[gameId] = { scouted: false, plan: null };
+  if (!S.coaching.gamePlans[gameId]) S.coaching.gamePlans[gameId] = { scouted: false, plan: null };
   S.coaching.gamePlans[gameId].plan = plan;
   save();
   render();
@@ -3094,12 +3549,12 @@ function setDevFocus(playerId, ratingKey) {
 function userUpcomingGames(n) {
   if (!S.season) return [];
   return S.season.schedule
-    .filter(
-      (g) => !g.played && (g.home === S.team.abbr || g.away === S.team.abbr),
-    )
+    .filter((g) => !g.played && (g.home === S.team.abbr || g.away === S.team.abbr))
     .slice(0, n || 3);
 }
-function applyWeeklyTransition() {
+function applyWeeklyTransition(week = S.week) {
+  if (S.coaching.lastTransitionWeek === week) return false;
+  S.coaching.lastTransitionWeek = week;
   // Player dev focus: gains per game scaled by dev coach skill multipliers.
   const df = S.coaching.devFocus;
   if (df && df.playerId) {
@@ -3109,10 +3564,16 @@ function applyWeeklyTransition() {
       const cap = Math.min(99, target.ratings.potential);
       const dev = S.coaches && S.coaches.dev;
       const mult = (dev && dev.devMultipliers && dev.devMultipliers[k]) || 1.0;
-      const mentorBonus =
-        dev && dev.traits && dev.traits.includes("mentor") ? 0.3 : 0;
-      S.coaches.devAccumulator =
-        (S.coaches.devAccumulator || 0) + mult + mentorBonus;
+      const mentorBonus = dev && dev.traits && dev.traits.includes("mentor") ? 0.3 : 0;
+      const youngDev =
+        dev &&
+        dev.traits &&
+        dev.traits.includes("young-developer") &&
+        target.rookieYear !== null &&
+        target.rookieYear !== undefined
+          ? 0.2
+          : 0;
+      S.coaches.devAccumulator = (S.coaches.devAccumulator || 0) + mult + mentorBonus + youngDev;
       let pts = 0;
       while (S.coaches.devAccumulator >= 1 && target.ratings[k] < cap) {
         target.ratings[k] = Math.min(cap, (target.ratings[k] || 0) + 1);
@@ -3133,14 +3594,15 @@ function applyWeeklyTransition() {
       }
     }
   }
+  return true;
 }
 function rollInjuries(g) {
   const checkTeam = (id) => {
     const team = teamMeta(id);
     const top = healthyRotation(team.players, 8);
     top.forEach((p) => {
-      if (Math.random() < 0.022) {
-        const r = Math.random();
+      if (random() < BALANCE.injuryRate) {
+        const r = random();
         let games, severity;
         if (r < 0.6) {
           games = rand(1, 2);
@@ -3165,20 +3627,19 @@ function rollInjuries(g) {
   checkTeam(g.home);
   checkTeam(g.away);
 }
-function tickAllInjuries() {
+function tickTeamInjuries(teamId, eligibleIds) {
   const dec = (p) => {
     if (!p.injury) return;
+    if (eligibleIds && !eligibleIds.has(p.id)) return;
     p.injury.games -= 1;
     if (p.injury.games <= 0) {
       const wasUser = p.team === S.team.abbr;
       const name = p.name;
       p.injury = null;
-      if (wasUser)
-        addLog("Return from injury", `${name} cleared and back in rotation.`);
+      if (wasUser) addLog("Return from injury", `${name} cleared and back in rotation.`);
     }
   };
-  S.roster.forEach(dec);
-  S.teams.forEach((t) => t.players.forEach(dec));
+  teamMeta(teamId).players.forEach(dec);
 }
 function injuryBadge(p) {
   if (!p.injury) return `<span class="pill good">healthy</span>`;
@@ -3226,8 +3687,7 @@ function respondToPress(optId) {
   const opt = p.options.find((o) => o.id === optId);
   if (!opt) return;
   const clampMood = (n) => Math.max(20, Math.min(99, n));
-  if (optId === "team")
-    S.roster.forEach((r) => (r.mood = clampMood((r.mood || 60) + 2)));
+  if (optId === "team") S.roster.forEach((r) => (r.mood = clampMood((r.mood || 60) + 2)));
   else if (optId === "stars")
     S.roster
       .slice()
@@ -3245,8 +3705,7 @@ function respondToPress(optId) {
   } else if (optId === "schedule") {
     /* deflect to schedule — mild mood neutralizer */
     S.roster.forEach((r) => (r.mood = clampMood((r.mood || 60) + 1)));
-  } else if (optId === "honest")
-    S.roster.forEach((r) => (r.mood = clampMood((r.mood || 60) - 1)));
+  } else if (optId === "honest") S.roster.forEach((r) => (r.mood = clampMood((r.mood || 60) - 1)));
   S.coaching.pressLog.unshift({
     when: `Week ${S.week}`,
     headline: p.headline,
@@ -3258,7 +3717,7 @@ function respondToPress(optId) {
   render();
 }
 function coachingView() {
-  return `${kpis()}${coachingStaffSection()}<div class="layout2" style="margin-top:18px"><div>${weeklyFocusSection()}${devFocusSection()}</div><div>${pressSection()}${injurySection()}</div></div><p class="muted" style="margin-top:14px;text-align:center">Pre-game scouting and game plans live on the <b>Season</b> tab.</p>`;
+  return `${kpis()}${coachingStaffSection()}<div style="margin-top:18px">${nextGamesSection()}</div><div class="layout2" style="margin-top:18px"><div>${weeklyFocusSection()}${devFocusSection()}</div><div>${pressSection()}${injurySection()}</div></div>`;
 }
 function faCoachPool(role) {
   const pool = (DATA.coachCandidates && DATA.coachCandidates[role]) || [];
@@ -3269,6 +3728,7 @@ function hireCoach(role, candidateId) {
   const pool = (DATA.coachCandidates && DATA.coachCandidates[role]) || [];
   const candidate = pool.find((c) => c.id === candidateId);
   if (!candidate) return;
+  recordUndo("coaching change");
   const prev = S.coaches[role] ? S.coaches[role].name : "the previous coach";
   S.coaches[role] = JSON.parse(JSON.stringify(candidate));
   if (role === "dev") S.coaches.devAccumulator = 0;
@@ -3278,10 +3738,7 @@ function hireCoach(role, candidateId) {
       : role === "assistant"
         ? "Assistant Coach"
         : "Player Development Coach";
-  addLog(
-    "Coaching staff change",
-    `${candidate.name} replaces ${prev} as ${roleLabel}.`,
-  );
+  addLog("Coaching staff change", `${candidate.name} replaces ${prev} as ${roleLabel}.`);
   toast(`${candidate.name} hired.`);
   modal = null;
   save();
@@ -3292,8 +3749,7 @@ function openHireModal(role) {
   render();
 }
 function coachCard(c, role, isCurrent) {
-  const sys =
-    c.system && DATA.coachingSystems && DATA.coachingSystems[c.system];
+  const sys = c.system && DATA.coachingSystems && DATA.coachingSystems[c.system];
   const sysLine = sys
     ? `<div class="mini" style="margin-top:4px"><b>${sys.label}</b> — ${sys.desc}</div>`
     : "";
@@ -3354,9 +3810,9 @@ function weeklyFocusSection() {
   const cur = S.coaching.weeklyFocus;
   const tiles = FOCUS_OPTIONS.map(
     (f) =>
-      `<div class="cityTile ${cur === f.id ? "selected" : ""}" data-focus="${f.id}"><strong>${f.icon} ${f.label}</strong><small>${f.desc}</small></div>`,
+      `<button type="button" class="cityTile ${cur === f.id ? "selected" : ""}" data-focus="${f.id}" role="radio" aria-checked="${cur === f.id}"><strong>${f.icon} ${f.label}</strong><small>${f.desc}</small></button>`,
   ).join("");
-  return `<section class="card"><div class="sectionTitle"><h3>This Week's Focus</h3><span>Week ${S.week} · sets the tone for every game until you change it</span></div><div class="cardPad"><div class="tiles">${tiles}</div></div></section>`;
+  return `<section class="card"><div class="sectionTitle"><h3>This Week's Focus</h3><span>Week ${S.week} · applies to your games this week</span></div><div class="cardPad"><div class="tiles" role="radiogroup" aria-label="Weekly coaching focus">${tiles}</div></div></section>`;
 }
 function nextGamesSection() {
   const games = userUpcomingGames(3);
@@ -3385,7 +3841,7 @@ function nextGamesSection() {
       const planBlock = gp.scouted
         ? `<div class="actions" style="margin-top:10px"><button class="btn ${gp.plan === "pack" ? "" : "secondary"}" data-plan="${g.id}|pack">Pack the Paint</button><button class="btn ${gp.plan === "extend" ? "" : "secondary"}" data-plan="${g.id}|extend">Extend Defense</button>${gp.plan ? `<button class="btn ghost" data-plan="${g.id}|none">Clear</button>` : ""}</div>`
         : "";
-      return `<div class="logItem"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px"><b>Week ${g.week} · ${isHome ? "vs" : "at"} <span class="teamBadge" style="background:${opp.primary}">${oppId}</span> ${opp.name}</b><span class="pill">${gp.plan ? (gp.plan === "pack" ? "Pack" : "Extend") : gp.scouted ? "Plan?" : "Unscouted"}</span></div><div style="margin-top:10px">${scoutBlock}${planBlock}</div></div>`;
+      return `<div class="logItem"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px"><b>Week ${g.week} · ${isHome ? "vs" : "at"} <span class="teamBadge" style="${badgeStyle(opp.primary)}">${oppId}</span> ${opp.name}</b><span class="pill">${gp.plan ? (gp.plan === "pack" ? "Pack" : "Extend") : gp.scouted ? "Plan?" : "Unscouted"}</span></div><div style="margin-top:10px">${scoutBlock}${planBlock}</div></div>`;
     })
     .join("");
   return `<section class="card"><div class="sectionTitle"><h3>Upcoming Games</h3><span>scout opponents, set defensive plans</span></div><div class="cardPad log">${cards}</div></section>`;
@@ -3402,16 +3858,11 @@ function devFocusSection() {
       )
       .join("");
   const ratingOpts = RATING_KEYS.filter((k) => k !== "potential")
-    .map(
-      (k) =>
-        `<option value="${k}" ${cur.rating === k ? "selected" : ""}>${k}</option>`,
-    )
+    .map((k) => `<option value="${k}" ${cur.rating === k ? "selected" : ""}>${k}</option>`)
     .join("");
-  const target = cur.playerId
-    ? S.roster.find((p) => p.id === cur.playerId)
-    : null;
+  const target = cur.playerId ? S.roster.find((p) => p.id === cur.playerId) : null;
   const note = target
-    ? `Currently developing <b>${target.name}</b> on <b>${cur.rating}</b> (${target.ratings[cur.rating]} → cap ${Math.min(99, target.ratings.potential)}). +1 per week until capped.`
+    ? `Currently developing <b>${escapeHtml(target.name)}</b> on <b>${escapeHtml(cur.rating)}</b> (${target.ratings[cur.rating]} → cap ${Math.min(99, target.ratings.potential)}). +1 per week until capped.`
     : "Pick a player and rating to give them focused individual work each week.";
   return `<section class="card"><div class="sectionTitle"><h3>Player Development</h3><span>+1 rating per week</span></div><div class="cardPad"><div class="field"><label>Player</label><select id="dev-player">${playerOpts}</select></div><div class="field"><label>Skill emphasis</label><select id="dev-rating">${ratingOpts}</select></div><div class="actions"><button class="btn" data-action="commitDevFocus">Set Development</button></div><p class="muted" style="margin-top:10px">${note}</p></div></section>`;
 }
@@ -3439,7 +3890,7 @@ function pressSection() {
   const log = S.coaching.pressLog || [];
   let pendingHtml = "";
   if (pending) {
-    pendingHtml = `<div class="logItem" style="border-color:var(--orange);background:#fff6ee"><b>${pending.headline}</b><p class="muted">${pending.body}</p><div class="actions" style="flex-direction:column;align-items:stretch;gap:8px">${pending.options.map((o) => `<button class="btn secondary" data-press="${o.id}" style="text-align:left">${o.text}</button>`).join("")}</div></div>`;
+    pendingHtml = `<div class="logItem" style="border-color:var(--orange);background:#fff6ee"><b>${escapeHtml(pending.headline)}</b><p class="muted">${escapeHtml(pending.body)}</p><div class="actions" style="flex-direction:column;align-items:stretch;gap:8px">${pending.options.map((o) => `<button class="btn secondary" data-press="${escapeAttr(o.id)}" style="text-align:left">${escapeHtml(o.text)}</button>`).join("")}</div></div>`;
   }
   const logHtml = log.length
     ? `<div class="log">${log.map((e) => `<div class="logItem"><b>${e.headline}</b><div class="mini">${e.when} · "${e.choice}"</div></div>`).join("")}</div>`
@@ -3492,12 +3943,23 @@ function adminView() {
                 .map(
                   (r, i) =>
                     `<div class="checkRow"><div><b>${escapeHtml(r.name)}</b> <span class="pill">${escapeHtml(r.pos)}</span> <span class="pill">${escapeHtml(r.archetype)}</span><div class="mini">${escapeHtml(r.team)} · ${shortMoney(r.salary)} · upside ${r.ratings.potential}</div></div><button class="btn danger" data-rm-rookie="${y}|${i}">Remove</button></div>`,
-
                 )
                 .join("")}</div>`,
           )
           .join("");
-  return `<section class="card"><div class="sectionTitle"><h3>Add Custom Rookie</h3><span>Players added here join the named class for their draft year</span></div><div class="cardPad"><div class="layout2"><div><div class="field"><label>Name</label><input id="cr-name" placeholder="Player Name"></div><div class="field"><label>Position</label><select id="cr-pos">${POSITION_OPTIONS.map((p) => `<option value="${p}">${p}</option>`).join("")}</select></div><div class="field"><label>College / Origin</label><input id="cr-college" placeholder="UConn"></div><div class="field"><label>Draft Year</label><input id="cr-year" type="number" value="${nextYear}" min="${nextYear}"></div><div class="field"><label>Archetype</label><select id="cr-arch">${ARCHETYPE_OPTIONS.map((a) => `<option value="${a}">${a}</option>`).join("")}</select></div><div class="field"><label>Salary ($)</label><input id="cr-salary" type="number" value="400000" min="80000" step="10000"></div><div class="field"><label>Contract Years</label><input id="cr-years" type="number" value="4" min="1" max="4"></div></div><div><div class="ratingGrid">${ratingFields}</div><div class="field"><label>Scouting (optional)</label><textarea id="cr-scouting" rows="2" placeholder="Auto-filled from archetype if blank"></textarea></div><div class="field"><label>Strengths (optional)</label><input id="cr-strengths" placeholder="Auto-derived from top ratings if blank"></div><div class="field"><label>Weaknesses (optional)</label><input id="cr-weaknesses" placeholder="Auto-derived from low ratings if blank"></div><div class="actions"><button class="btn" data-action="addCustomRookie">Add to Draft Class</button></div></div></div><hr style="border:0;border-top:1px solid var(--line);margin:24px 0"><h3>Current Custom Rookies</h3>${list}<hr style="border:0;border-top:1px solid var(--line);margin:24px 0"><div class="sectionTitle"><h3>Save Management</h3><span>Export, import, or reset your local franchise save.</span></div><div class="cardPad"><div class="layout2"><button class="btn" data-action="exportSave">Export Save</button><button class="btn secondary" data-action="importSave">Import Save</button><button class="btn ghost" data-action="reset">Reset Save</button></div><div class="field"><label>Paste save JSON here</label><textarea id="saveImport" rows="4" placeholder="Paste exported save JSON"></textarea></div><div class="logItem">Save version <b>${S.saveVersion}</b> · Last saved <b>${S.lastSaved ? new Date(S.lastSaved).toLocaleString() : "unknown"}</b></div></div></div></section>`;
+  const slots = readSaveIndex();
+  const importPreview = pendingImport
+    ? `<div class="logItem importPreview"><b>Ready to import: ${escapeHtml(pendingImport.saveName)}</b><p class="muted">${escapeHtml(pendingImport.team.city)} ${escapeHtml(pendingImport.team.nickname)} · Year ${pendingImport.year} · ${pendingImport.roster.length} roster players</p><div class="actions"><button class="btn" data-action="confirmImport">Apply Import</button><button class="btn secondary" data-action="cancelImport">Cancel</button></div></div>`
+    : "";
+  const slotList = slots.length
+    ? slots
+        .map(
+          (slot) =>
+            `<div class="checkRow"><div><b>${escapeHtml(slot.name)}</b> ${slot.id === activeSlotId ? '<span class="pill good">Active</span>' : ""}<div class="mini">Year ${slot.year} · ${slot.updatedAt ? new Date(slot.updatedAt).toLocaleString() : "unknown"}</div></div><div class="actions">${slot.id === activeSlotId ? "" : `<button class="btn secondary" data-load-slot="${escapeAttr(slot.id)}">Load</button><button class="btn danger" data-delete-slot="${escapeAttr(slot.id)}">Delete</button>`}</div></div>`,
+        )
+        .join("")
+    : '<div class="empty">Your current franchise will appear here after autosave.</div>';
+  return `<section class="card"><div class="sectionTitle"><h3>Add Custom Rookie</h3><span>Players added here join the named class for their draft year</span></div><div class="cardPad"><div class="layout2"><div><div class="field"><label>Name</label><input id="cr-name" placeholder="Player Name"></div><div class="field"><label>Position</label><select id="cr-pos">${POSITION_OPTIONS.map((p) => `<option value="${p}">${p}</option>`).join("")}</select></div><div class="field"><label>College / Origin</label><input id="cr-college" placeholder="UConn"></div><div class="field"><label>Draft Year</label><input id="cr-year" type="number" value="${nextYear}" min="${nextYear}"></div><div class="field"><label>Archetype</label><select id="cr-arch">${ARCHETYPE_OPTIONS.map((a) => `<option value="${a}">${a}</option>`).join("")}</select></div><div class="field"><label>Salary ($)</label><input id="cr-salary" type="number" value="400000" min="80000" step="10000"></div><div class="field"><label>Contract Years</label><input id="cr-years" type="number" value="4" min="1" max="4"></div></div><div><div class="ratingGrid">${ratingFields}</div><div class="field"><label>Scouting (optional)</label><textarea id="cr-scouting" rows="2" placeholder="Auto-filled from archetype if blank"></textarea></div><div class="field"><label>Strengths (optional)</label><input id="cr-strengths" placeholder="Auto-derived from top ratings if blank"></div><div class="field"><label>Weaknesses (optional)</label><input id="cr-weaknesses" placeholder="Auto-derived from low ratings if blank"></div><div class="actions"><button class="btn" data-action="addCustomRookie">Add to Draft Class</button></div></div></div><hr style="border:0;border-top:1px solid var(--line);margin:24px 0"><h3>Current Custom Rookies</h3>${list}<hr style="border:0;border-top:1px solid var(--line);margin:24px 0"><div class="sectionTitle"><h3>Save Slots</h3><span>Current: ${escapeHtml(S.saveName)}</span></div><div class="cardPad"><div class="field"><label>Name this copy</label><input id="save-slot-name" maxlength="60" placeholder="My second franchise"></div><div class="actions"><button class="btn" data-action="createSaveSlot">Save Current Franchise As…</button></div><div class="log" style="margin-top:16px">${slotList}</div></div><div class="sectionTitle"><h3>Backup &amp; Recovery</h3><span>Export, import, or reset the active save.</span></div><div class="cardPad"><div class="layout2"><button class="btn" data-action="exportSave">Export Save</button><button class="btn secondary" data-action="importSave">Validate Import</button><button class="btn ghost" data-action="reset">Reset Active Save</button></div><div class="field"><label>Paste save JSON here</label><textarea id="saveImport" rows="4" placeholder="Paste exported save JSON"></textarea></div>${importPreview}<div class="logItem">Save version <b>${S.saveVersion}</b> · Balance version <b>${S.balanceVersion}</b> · Seed <b>${S.rngSeed}</b> · Last saved <b>${S.lastSaved ? new Date(S.lastSaved).toLocaleString() : "unknown"}</b></div></div></div></section>`;
 }
 function readField(id) {
   const el = document.getElementById(id);
@@ -3509,23 +3971,15 @@ function addCustomRookie() {
   const pos = readField("cr-pos");
   const college = readField("cr-college").trim() || "Free Agent";
   const year = parseInt(readField("cr-year"), 10);
-  if (!year || year < S.year + 1)
-    return toast(`Draft year must be ${S.year + 1} or later.`);
+  if (!year || year < S.year + 1) return toast(`Draft year must be ${S.year + 1} or later.`);
   const archetype = readField("cr-arch");
   const salary = Math.max(80000, parseInt(readField("cr-salary"), 10) || 0);
-  const years = Math.max(
-    1,
-    Math.min(4, parseInt(readField("cr-years"), 10) || 4),
-  );
+  const years = Math.max(1, Math.min(4, parseInt(readField("cr-years"), 10) || 4));
   const ratings = {};
-  RATING_KEYS.forEach(
-    (k) => (ratings[k] = clampRating(parseInt(readField("cr-" + k), 10) || 60)),
-  );
-  const scouting =
-    readField("cr-scouting").trim() || rookieScout(archetype, pos);
+  RATING_KEYS.forEach((k) => (ratings[k] = clampRating(parseInt(readField("cr-" + k), 10) || 60)));
+  const scouting = readField("cr-scouting").trim() || rookieScout(archetype, pos);
   const strengths = readField("cr-strengths").trim() || ratingsTop(ratings);
-  const weaknesses =
-    readField("cr-weaknesses").trim() || ratingsBottom(ratings);
+  const weaknesses = readField("cr-weaknesses").trim() || ratingsBottom(ratings);
   const id = "custom-" + year + "-" + slug(name + "-" + college);
   if (!S.customRookies[year]) S.customRookies[year] = [];
   if (S.customRookies[year].some((r) => r.id === id))
@@ -3561,7 +4015,20 @@ function removeCustomRookie(key) {
   render();
 }
 // Skip the initial paint under the test harness (no real DOM).
-if (typeof window === "undefined" || !window.__WNBA_TEST__) render();
+if (typeof window === "undefined" || !window.__WNBA_TEST__) {
+  render();
+  resumeOffseasonDraft();
+}
+
+if (
+  typeof navigator !== "undefined" &&
+  "serviceWorker" in navigator &&
+  location.protocol !== "file:"
+) {
+  navigator.serviceWorker.register("./sw.js").catch((error) => {
+    console.warn("Offline cache registration failed", error);
+  });
+}
 
 // Node-only export surface for unit tests. `module` is undefined in the browser,
 // so this block is inert there and has zero effect on the shipped app.
@@ -3574,18 +4041,41 @@ if (typeof module !== "undefined" && module.exports) {
     teamLetter,
     abbr,
     uniqueUserAbbr,
+    uniqueAbbrAgainst,
     ordinal,
     migrate,
+    normalizeSave,
     freshState,
     isValidSave,
+    isValidPlayer,
     generateSchedule,
     teamPower,
     simScore,
     evaluateTrade,
     distributeAndRecord,
+    ageOnePlayer,
+    resolveExpiredContracts,
+    applyWeeklyTransition,
+    tickTeamInjuries,
+    waiverPool,
+    userPickRookie,
     healthyRotation,
     leagueIds,
     clearComputeCaches,
+    resetFaBase,
+    requireOpeningNightReady,
+    buildDraftOrder,
+    resumeOffseasonDraft,
+    seedOffseason,
+    processAiPicks,
+    startNextSeason,
+    enterPlayoffs,
+    signPlayer,
+    setWeeklyFocus,
+    maybeResetWeeklyFocus,
+    clearAllInjuries,
+    marketChurn,
+    firstTag,
     get S() {
       return S;
     },

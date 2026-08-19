@@ -7,6 +7,10 @@ const fs = require("fs");
 const path = require("path");
 
 const ROOT = path.join(__dirname, "..");
+const FACTORIES = fs.readFileSync(path.join(ROOT, "factories.js"), "utf8");
+const CONFIG = fs.readFileSync(path.join(ROOT, "config.js"), "utf8");
+const ENGINE = fs.readFileSync(path.join(ROOT, "engine.js"), "utf8");
+const SCHEMA = fs.readFileSync(path.join(ROOT, "state-schema.js"), "utf8");
 const DATA = fs.readFileSync(path.join(ROOT, "data.js"), "utf8");
 const APP = fs.readFileSync(path.join(ROOT, "app.js"), "utf8");
 
@@ -78,6 +82,10 @@ function loadGame(seed) {
   }
   ctx.globalThis = ctx;
   vm.createContext(ctx);
+  vm.runInContext(FACTORIES, ctx, { filename: "factories.js" });
+  vm.runInContext(CONFIG, ctx, { filename: "config.js" });
+  vm.runInContext(ENGINE, ctx, { filename: "engine.js" });
+  vm.runInContext(SCHEMA, ctx, { filename: "state-schema.js" });
   vm.runInContext(DATA, ctx, { filename: "data.js" });
   vm.runInContext(APP, ctx, { filename: "app.js" });
   return ctx.module.exports;

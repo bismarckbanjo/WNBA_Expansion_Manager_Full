@@ -4,7 +4,7 @@
   --ink: #16120f;
   --muted: #756b62;
   --line: #e9dfd4;
-  --orange: #f16622;
+  --orange: #b9470f;
   --orange2: #ff8a3d;
   --red: #d93b2b;
   --green: #168455;
@@ -13,18 +13,14 @@
   --radius: 22px;
   --user1: #f16622;
   --user2: #101010;
+  --userText: #ffffff;
 }
 * {
   box-sizing: border-box;
 }
 body {
   margin: 0;
-  background: radial-gradient(
-    circle at top left,
-    #fff 0,
-    #fff2e7 34%,
-    var(--bg) 62%
-  );
+  background: radial-gradient(circle at top left, #fff 0, #fff2e7 34%, var(--bg) 62%);
   font-family:
     Inter,
     ui-sans-serif,
@@ -44,6 +40,15 @@ select {
 button {
   border: 0;
   cursor: pointer;
+}
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible,
+a:focus-visible {
+  outline: 3px solid #245dff;
+  outline-offset: 3px;
 }
 .appShell {
   min-height: 100vh;
@@ -327,11 +332,15 @@ button {
   background: linear-gradient(90deg, var(--user1), var(--user2));
 }
 .setup {
+  width: min(1060px, calc(100% - 20px));
   max-width: 1060px;
   margin: 26px auto;
   display: grid;
   grid-template-columns: 0.95fr 1.1fr;
   gap: 18px;
+}
+.setup > * {
+  min-width: 0;
 }
 .hero {
   padding: 34px;
@@ -383,6 +392,8 @@ button {
 }
 .field input,
 .field select {
+  width: 100%;
+  min-width: 0;
   border: 1px solid var(--line);
   border-radius: 14px;
   background: #fff;
@@ -410,7 +421,7 @@ button {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: white;
+  color: var(--userText);
   font-weight: 950;
   font-size: 48px;
   letter-spacing: -0.06em;
@@ -428,6 +439,8 @@ button {
   padding: 14px;
   background: #fff;
   cursor: pointer;
+  color: var(--ink);
+  text-align: left;
 }
 .cityTile.selected {
   border-color: var(--orange);
@@ -674,6 +687,22 @@ button {
   display: grid;
   gap: 10px;
 }
+.ratingGlossary {
+  margin: -6px 0 18px;
+  padding: 12px 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.78);
+  color: var(--muted);
+}
+.ratingGlossary summary {
+  color: var(--ink);
+  cursor: pointer;
+  font-weight: 800;
+}
+.ratingGlossary p {
+  margin: 10px 0 0;
+}
 .impactRow {
   display: grid;
   grid-template-columns: 90px 1fr 42px;
@@ -687,11 +716,20 @@ button {
   }
   .side {
     height: auto;
-    position: relative;
+    position: sticky;
+    z-index: 10;
+    padding: 12px 16px;
+    gap: 10px;
   }
   .nav {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    display: flex;
+    flex-direction: row;
+    overflow-x: auto;
+    padding-bottom: 3px;
+    scrollbar-width: thin;
+  }
+  .nav button {
+    flex: 0 0 auto;
   }
   .grid.kpis,
   .layout2,
@@ -706,6 +744,9 @@ button {
   .splitControls {
     grid-template-columns: 1fr;
   }
+  .hero {
+    min-height: 310px;
+  }
   .topbar {
     align-items: flex-start;
     flex-direction: column;
@@ -718,20 +759,65 @@ button {
   .table {
     font-size: 13px;
   }
-  .table th:nth-child(4),
-  .table td:nth-child(4),
-  .table th:nth-child(5),
-  .table td:nth-child(5) {
-    display: none;
+  .table {
+    display: block;
+    overflow-x: auto;
+    white-space: nowrap;
+    -webkit-overflow-scrolling: touch;
+  }
+  .table thead,
+  .table tbody {
+    display: table;
+    width: 100%;
+    min-width: 680px;
+    table-layout: auto;
   }
   .hero h1 {
     font-size: 40px;
   }
   .nav {
-    grid-template-columns: 1fr 1fr;
+    display: flex;
+    grid-template-columns: none;
   }
   .tiles {
     grid-template-columns: 1fr;
+  }
+  .setup {
+    margin: 10px auto;
+  }
+  .hero {
+    min-height: 260px;
+    padding: 24px;
+    border-radius: 22px;
+  }
+  .previewJersey {
+    display: none;
+  }
+  .playerCard {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+  .playerCard > .actions {
+    grid-column: 1 / -1;
+    flex-direction: row;
+    align-items: stretch;
+  }
+  .playerCard > .actions .btn {
+    flex: 1;
+  }
+  .modalShade {
+    padding: 10px;
+  }
+  .modal {
+    border-radius: 20px;
+    max-height: 94vh;
+  }
+  #toast {
+    inset-inline: 12px;
+    right: auto;
+    bottom: 12px;
+  }
+  .toast {
+    max-width: none;
   }
 }
 .scheduleList {
@@ -787,5 +873,15 @@ button {
   }
   .gameRow > div:nth-child(6) {
     grid-column: 1 / -1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }

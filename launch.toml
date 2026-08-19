@@ -1,0 +1,16 @@
+name = "WNBA Manager"
+category = "games"
+
+[[service]]
+name = "Game Server"
+cmd = "python3 -m http.server 8016"
+
+[[command]]
+name = "Play in Browser"
+cmd = "open http://localhost:8016"
+detach = true
+
+[[command]]
+name = "Run Tests"
+cmd = "npm test"
+show_output = true
