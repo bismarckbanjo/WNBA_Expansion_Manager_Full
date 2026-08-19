@@ -539,6 +539,11 @@ window.GAME_DATA = {
         name: "Kelvin Tate",
         traits: ["defensive-coordinator", "motivator"],
       },
+      {
+        id: "asst-crowe",
+        name: "Dana Crowe",
+        traits: ["disciplinarian", "defensive-coordinator"],
+      },
     ],
     dev: [
       {
@@ -712,12 +717,109 @@ window.GAME_DATA = {
     "scout-genius": "Scout Genius (auto-scout next opponent each week)",
     "defensive-coordinator": "Defensive Coordinator (game plan grants +4/-2 instead of +3/-1)",
     motivator: "Motivator (+2 mood per user game)",
+    disciplinarian: "Strict Disciplinarian (high-tension chemistry penalty cut to 40%)",
     mentor: "Mentor (all dev multipliers +0.3)",
     "shooting-specialist": "Shooting Specialist (1.5x shooting growth)",
     "defense-specialist": "Defense Specialist (1.5x defense growth)",
     "playmaking-specialist": "Playmaking Specialist (1.5x playmaking growth)",
     "rebounding-specialist": "Rebounding Specialist (1.5x rebounding growth)",
     "balanced-developer": "Balanced Developer (1.0x all skills, no specialty)",
+  },
+  personality: {
+    public: {
+      "gym-rat": {
+        label: "Gym Rat",
+        desc: "Lives in the gym. Extra growth around veteran mentors.",
+      },
+      "media-darling": {
+        label: "Media Darling",
+        desc: "Draws cameras and attention. Can grate on quieter teammates.",
+      },
+      "vocal-leader": {
+        label: "Vocal Leader",
+        desc: "Sets the tone out loud. Lifts glue players, crowds fragile egos.",
+      },
+      "quiet-pro": {
+        label: "Quiet Pro",
+        desc: "Keeps her head down. Clashes with loud or chaotic personalities.",
+      },
+      "locker-glue": {
+        label: "Locker Glue",
+        desc: "Holds the room together. Softens tension when paired with a leader.",
+      },
+      flashy: {
+        label: "Flashy",
+        desc: "Plays with style. Entertainment value, occasional friction.",
+      },
+      competitor: {
+        label: "Competitor",
+        desc: "Hates losing more than anything. Feeds off other competitors.",
+      },
+      mentor: {
+        label: "Mentor",
+        desc: "Takes young players under her wing and speeds their growth.",
+      },
+      sponge: {
+        label: "Sponge",
+        desc: "Receptive rookie. Learns faster with a veteran mentor nearby.",
+      },
+    },
+    hidden: {
+      "drama-prone": {
+        label: "Drama-Prone",
+        desc: "Small slights become locker-room weather.",
+      },
+      "fragile-ego": {
+        label: "Fragile Ego",
+        desc: "Needs the ball and the credit. Touches dry up when the room is tense.",
+      },
+      instigator: {
+        label: "Instigator",
+        desc: "Pokes at teammates. Raises the temperature around glue and loyal vets.",
+      },
+      selfish: {
+        label: "Selfish",
+        desc: "Looks for her shot first. Gets frozen out when tension spikes.",
+      },
+      loyal: {
+        label: "Loyal",
+        desc: "Has her teammates' backs. Clashes with instigators.",
+      },
+      "thick-skin": {
+        label: "Thick Skin",
+        desc: "Lets noise roll off. Stabilizes a chaotic room.",
+      },
+    },
+    mentorPersonas: ["mentor"],
+    receptivePersonas: ["sponge", "gym-rat"],
+    conflicts: [
+      ["quiet-pro", "vocal-leader"],
+      ["quiet-pro", "media-darling"],
+      ["quiet-pro", "flashy"],
+      ["gym-rat", "media-darling"],
+      ["locker-glue", "instigator"],
+      ["loyal", "instigator"],
+      ["vocal-leader", "drama-prone"],
+      ["vocal-leader", "fragile-ego"],
+      ["competitor", "drama-prone"],
+      ["mentor", "instigator"],
+      ["selfish", "locker-glue"],
+      ["selfish", "vocal-leader"],
+      ["flashy", "fragile-ego"],
+      ["drama-prone", "drama-prone"],
+      ["instigator", "instigator"],
+      ["media-darling", "loyal"],
+    ],
+    synergies: [
+      { a: "mentor", b: "sponge", type: "dev" },
+      { a: "mentor", b: "gym-rat", type: "dev" },
+      { a: "vocal-leader", b: "locker-glue", type: "calm" },
+      { a: "gym-rat", b: "gym-rat", type: "dev" },
+      { a: "competitor", b: "competitor", type: "play" },
+      { a: "quiet-pro", b: "mentor", type: "dev" },
+      { a: "locker-glue", b: "loyal", type: "calm" },
+      { a: "thick-skin", b: "drama-prone", type: "calm" },
+    ],
   },
   // Add named players to specific future rookie classes here.
   // They'll be appended to that year's class (auto-generated names for empty years).

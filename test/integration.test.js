@@ -178,6 +178,7 @@ itDom("rookie draft resumes AI picks after a mid-draft reload", () => {
   const w = boot();
   w.actions("start");
   const npcId = w.GAME_DATA.teams[0].id;
+  const userId = w.leagueIds()[0];
   w.seedOffseason({
     stage: "draft",
     agingReport: [],
@@ -208,7 +209,7 @@ itDom("rookie draft resumes AI picks after a mid-draft reload", () => {
         injury: null,
       },
     ],
-    draftOrder: [npcId, "PHI"],
+    draftOrder: [npcId, userId],
     picks: [],
     currentPickIdx: 0,
   });

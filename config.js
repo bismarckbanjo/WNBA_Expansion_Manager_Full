@@ -1,7 +1,7 @@
 // Versioned simulation knobs. Saves record the version so future migrations can
 // explain balance changes without scattering magic numbers through the engine.
 window.GAME_BALANCE = Object.freeze({
-  version: 1,
+  version: 2,
   compositeWeights: Object.freeze({
     scoring: 0.19,
     shooting: 0.14,
@@ -18,6 +18,17 @@ window.GAME_BALANCE = Object.freeze({
   homeAdvantage: 2.2,
   injuryRate: 0.022,
   moodScoreScale: 0.04,
+  lockerRoom: Object.freeze({
+    chemistryScale: 0.0012,
+    disciplinarianFactor: 0.4,
+    freezeTension: 40,
+    freezeFactor: 0.62,
+    revealBase: 0.07,
+    blowupTension: 45,
+    blowupChance: 0.14,
+    influencePerWeek: 1,
+    suppressWeeks: 2,
+  }),
   tradeDeadlineWeek: 12,
   undoLimit: 5,
   trade: Object.freeze({

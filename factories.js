@@ -21,6 +21,55 @@ function stableAge(name, teamId) {
   return 22 + (Math.abs(hash) % 13);
 }
 
+const PUBLIC_PERSONAS = [
+  "gym-rat",
+  "media-darling",
+  "vocal-leader",
+  "quiet-pro",
+  "locker-glue",
+  "flashy",
+  "competitor",
+  "mentor",
+  "sponge",
+];
+const HIDDEN_TRAITS = [
+  "drama-prone",
+  "fragile-ego",
+  "instigator",
+  "selfish",
+  "loyal",
+  "thick-skin",
+];
+
+function stableHash(value) {
+  const key = slug(value);
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) | 0;
+  return Math.abs(hash);
+}
+
+function assignPersonality(name, teamId, age) {
+  const years = Number.isFinite(age) ? age : 26;
+  const pubHash = stableHash(`${name}-${teamId}-persona`);
+  let persona = PUBLIC_PERSONAS[pubHash % PUBLIC_PERSONAS.length];
+  if (years >= 30 && pubHash % 3 === 0) persona = "mentor";
+  if (years <= 23 && pubHash % 3 === 1) persona = "sponge";
+  const hidHash = stableHash(`${name}-${teamId}-hidden`);
+  const hiddenTrait = hidHash % 100 < 28 ? null : HIDDEN_TRAITS[hidHash % HIDDEN_TRAITS.length];
+  return { persona, hiddenTrait, traitRevealed: false };
+}
+
+function ensurePersonality(player) {
+  if (!player || typeof player !== "object") return player;
+  if (!player.persona || player.hiddenTrait === undefined || player.traitRevealed === undefined) {
+    const assigned = assignPersonality(player.name || "player", player.team || "FA", player.age);
+    if (!player.persona) player.persona = assigned.persona;
+    if (player.hiddenTrait === undefined) player.hiddenTrait = assigned.hiddenTrait;
+    if (player.traitRevealed === undefined) player.traitRevealed = false;
+  }
+  return player;
+}
+
 function team(id, name, primary, secondary, status, players) {
   return { id, name, primary, secondary, status, players };
 }
@@ -70,9 +119,18 @@ function p(
     mood: stableMood(name, teamId),
     age: stableAge(name, teamId),
     injury: null,
+    ...assignPersonality(name, teamId, stableAge(name, teamId)),
   };
 }
 
 // Reference the cross-script globals so static analysis understands that these
 // factories are intentionally consumed by data.js.
-window.GAME_FACTORIES = { team, p, slug, stableMood, stableAge };
+window.GAME_FACTORIES = {
+  team,
+  p,
+  slug,
+  stableMood,
+  stableAge,
+  assignPersonality,
+  ensurePersonality,
+};

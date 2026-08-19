@@ -664,3 +664,197 @@ test("moveRotation can raise a player who started outside the top eight", () => 
   assert.strictEqual(g.S.rotation[7], "p8");
   assert.strictEqual(g.S.rotation[8], "p7");
 });
+
+test("year-two draft lets a full 12-player roster take a 2027 pick", () => {
+  const g = loadGame(1);
+  closedSeason(g, 12);
+  g.enterOffseason();
+  assert.ok(g.S.offseason.draftOrder.includes(g.S.team.abbr));
+  assert.ok(g.S.offseason.rookieClass.length >= g.S.offseason.draftOrder.length);
+  g.S.offseason.pendingResign = [];
+  g.S.offseason.stage = "draft";
+  g.processAiPicks();
+  assert.strictEqual(g.S.offseason.draftOrder[g.S.offseason.currentPickIdx], g.S.team.abbr);
+  const avail = g.S.offseason.rookieClass.find(
+    (p) => !g.S.offseason.picks.some((pk) => pk.playerId === p.id),
+  );
+  g.userPickRookie(avail.id);
+  assert.ok(g.S.roster.some((p) => p.id === avail.id));
+  assert.strictEqual(g.S.roster.length, 13);
+  const year = g.S.year;
+  g.S.offseason.stage = "done";
+  g.startNextSeason();
+  assert.strictEqual(g.S.year, year);
+});
+
+test("setup city change rehomes 2027 picks off the boot PHI stamp", () => {
+  const g = loadGame(1);
+  g.ensurePickBoard(g.S);
+  assert.ok(g.S.pickBoard.some((pick) => pick.owner === "PHI" && pick.year === 2027));
+  g.applyCity(0);
+  assert.strictEqual(g.S.team.abbr, "PFO");
+  assert.ok(g.S.pickBoard.some((pick) => pick.owner === "PFO" && pick.year === 2027));
+  assert.ok(!g.S.pickBoard.some((pick) => pick.owner === "PHI"));
+});
+
+test("start after a city tile still puts PFO in the 2027 draft", () => {
+  const g = loadGame(1);
+  g.applyCity(2);
+  const previous = g.S.team.abbr;
+  g.S.started = true;
+  g.S.team.abbr = g.uniqueUserAbbr(g.S.team.city, g.S.team.nickname);
+  g.reassignUserPicks(previous, g.S.team.abbr);
+  g.rehomeOrphanUserPicks(g.S);
+  closedSeason(g, 11);
+  g.S.year = 2026;
+  g.enterOffseason();
+  assert.ok(g.S.offseason.draftOrder.includes(g.S.team.abbr));
+  assert.ok(!g.S.offseason.draftOrder.includes("PHI"));
+});
+
+test("ensureUpcomingUserPick restores a missing 2027 user slot", () => {
+  const g = loadGame(1);
+  g.S.year = 2026;
+  g.ensurePickBoard(g.S);
+  g.S.pickBoard = g.S.pickBoard.filter(
+    (pick) => !(pick.original === g.S.team.abbr && pick.year === 2027),
+  );
+  assert.ok(!g.S.pickBoard.some((pick) => pick.owner === g.S.team.abbr && pick.year === 2027));
+  g.ensureUpcomingUserPick(g.S);
+  assert.ok(g.S.pickBoard.some((pick) => pick.owner === g.S.team.abbr && pick.year === 2027));
+});
+
+test("2027 season offseason still puts the user in the 2028 draft", () => {
+  const g = loadGame(1);
+  closedSeason(g, 11);
+  g.S.year = 2027;
+  g.ensureUpcomingUserPick(g.S);
+  g.enterOffseason();
+  assert.ok(g.S.offseason.draftOrder.includes(g.S.team.abbr));
+});
+
+test("compositeRating accepts a chemistry multiplier", () => {
+  const g = loadGame(1);
+  const weights = Object.fromEntries(RATING_KEYS.map((key) => [key, 0.125]));
+  assert.strictEqual(g.ENGINE.compositeRating(mkPlayer(80), RATING_KEYS, weights), 80);
+  assert.strictEqual(g.ENGINE.compositeRating(mkPlayer(80), RATING_KEYS, weights, 0.5), 40);
+});
+
+test("conflicting personas raise tension and lower chemistry", () => {
+  const g = loadGame(1);
+  const rules = {
+    conflicts: [["quiet-pro", "vocal-leader"]],
+    synergies: [{ a: "mentor", b: "sponge", type: "dev" }],
+  };
+  const quiet = mkPlayer(80, { id: "q", name: "Quiet", persona: "quiet-pro" });
+  const loud = mkPlayer(80, { id: "v", name: "Loud", persona: "vocal-leader" });
+  const report = g.ENGINE.tensionReport([quiet, loud], rules);
+  assert.ok(report.tension >= 10);
+  assert.strictEqual(report.conflicts.length, 1);
+  const raw = g.ENGINE.chemistryMultiplier(0, { scale: 0.0012 });
+  const hot = g.ENGINE.chemistryMultiplier(80, { scale: 0.0012 });
+  const staff = g.ENGINE.chemistryMultiplier(80, {
+    scale: 0.0012,
+    disciplinarian: true,
+    disciplinarianFactor: 0.4,
+  });
+  assert.ok(hot < raw);
+  assert.ok(staff > hot);
+});
+
+test("statShareFactor freezes out drama players when tension is high", () => {
+  const g = loadGame(1);
+  const drama = mkPlayer(80, { id: "d", hiddenTrait: "drama-prone" });
+  const glue = mkPlayer(80, { id: "g", hiddenTrait: null, persona: "locker-glue" });
+  assert.strictEqual(g.ENGINE.statShareFactor(drama, 10), 1);
+  assert.ok(g.ENGINE.statShareFactor(drama, 80) < 1);
+  assert.strictEqual(g.ENGINE.statShareFactor(glue, 80), 1);
+});
+
+test("mentorDevBonus speeds a sponge rookie next to a mentor", () => {
+  const g = loadGame(1);
+  const mentor = mkPlayer(80, { id: "m", name: "Vet", persona: "mentor", age: 32 });
+  const sponge = mkPlayer(70, {
+    id: "s",
+    name: "Kid",
+    persona: "sponge",
+    age: 22,
+    rookieYear: 2027,
+  });
+  const bonus = g.ENGINE.mentorDevBonus([mentor, sponge], 2027, {
+    mentorPersonas: ["mentor"],
+    receptivePersonas: ["sponge", "gym-rat"],
+  });
+  assert.ok(bonus.s > 0);
+  assert.ok(!bonus.m);
+});
+
+test("hidden trait reveals are deterministic for a seed", () => {
+  const g = loadGame(1);
+  const first = [];
+  for (let i = 0; i < 8; i++)
+    first.push(g.ENGINE.shouldRevealHidden("drama-prone", false, 60, i / 8, 0.2));
+  const second = [];
+  for (let i = 0; i < 8; i++)
+    second.push(g.ENGINE.shouldRevealHidden("drama-prone", false, 60, i / 8, 0.2));
+  assert.deepStrictEqual(first, second);
+  assert.ok(first.some(Boolean));
+  assert.ok(first.some((value) => !value));
+});
+
+test("migrate stamps public personas onto existing players", () => {
+  const g = loadGame(1);
+  const player = mkPlayer(70, { id: "old-1", name: "Legacy Guard" });
+  delete player.persona;
+  delete player.hiddenTrait;
+  const migrated = g.migrate({
+    team: g.S.team,
+    roster: [player],
+    teams: g.S.teams,
+    waived: [],
+    freeAgents: [],
+  });
+  assert.ok(migrated.roster[0].persona);
+  assert.ok(migrated.lockerRoom);
+});
+
+test("mediateLockerRoom spends weekly influence and suppresses tension", () => {
+  const g = loadGame(1);
+  g.S.started = true;
+  g.S.week = 4;
+  g.S.roster = [mkPlayer(80, { id: "a", mood: 50, persona: "quiet-pro" })];
+  g.S.lockerRoom = {
+    heat: 20,
+    suppressedUntilWeek: 0,
+    influence: 1,
+    lastInfluenceWeek: 4,
+    events: [],
+  };
+  g.mediateLockerRoom();
+  assert.strictEqual(g.S.lockerRoom.influence, 0);
+  assert.ok(g.S.lockerRoom.suppressedUntilWeek > 4);
+  assert.ok(g.S.roster[0].mood > 50);
+});
+
+test("team chemistry multiplier drops for a tense user rotation", () => {
+  const g = loadGame(1);
+  g.S.roster = [
+    mkPlayer(80, { id: "q1", pos: "G", persona: "quiet-pro", hiddenTrait: "drama-prone" }),
+    mkPlayer(80, { id: "v1", pos: "G", persona: "vocal-leader", hiddenTrait: "instigator" }),
+    mkPlayer(80, { id: "q2", pos: "F", persona: "quiet-pro" }),
+    mkPlayer(80, { id: "m1", pos: "F", persona: "media-darling" }),
+    mkPlayer(80, { id: "f1", pos: "C", persona: "flashy" }),
+    mkPlayer(80, { id: "c1", pos: "C", persona: "competitor" }),
+    mkPlayer(80, { id: "g1", pos: "G", persona: "gym-rat" }),
+    mkPlayer(80, { id: "l1", pos: "F", persona: "locker-glue" }),
+  ];
+  g.S.rotation = g.S.roster.map((p) => p.id);
+  g.S.lockerRoom.heat = 20;
+  g.clearComputeCaches();
+  const tense = g.teamChemistryMult(g.S.team.abbr);
+  g.S.coaches.assistant.traits = ["disciplinarian"];
+  g.clearComputeCaches();
+  const staffed = g.teamChemistryMult(g.S.team.abbr);
+  assert.ok(tense < 1);
+  assert.ok(staffed > tense);
+});

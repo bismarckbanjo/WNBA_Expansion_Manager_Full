@@ -6,7 +6,7 @@ const LS_KEY = "wnbaExpansionFullBuild.v2";
 const ACTIVE_SLOT_KEY = "wnbaExpansion.activeSlot.v1";
 const SAVE_INDEX_KEY = "wnbaExpansion.saveIndex.v1";
 const SLOT_PREFIX = "wnbaExpansion.slot.v1.";
-const SAVE_VERSION = 5;
+const SAVE_VERSION = 6;
 const money = (n) => "$" + Math.round(n).toLocaleString();
 const shortMoney = (n) =>
   n >= 1000000
@@ -133,6 +133,13 @@ function freshState() {
       pendingBuff: null,
       devAccumulator: 0,
     },
+    lockerRoom: {
+      heat: 0,
+      suppressedUntilWeek: 0,
+      influence: 1,
+      lastInfluenceWeek: 0,
+      events: [],
+    },
     log: [],
     objectives: [
       { id: "roster11", text: "Draft at least 11 players", done: false },
@@ -216,6 +223,12 @@ function migrate(s) {
   if (!s.coaches.dev) s.coaches.dev = JSON.parse(JSON.stringify(DATA.userStaffDefaults.dev));
   if (s.coaches.pendingBuff === undefined) s.coaches.pendingBuff = null;
   if (typeof s.coaches.devAccumulator !== "number") s.coaches.devAccumulator = 0;
+  if (!s.lockerRoom || typeof s.lockerRoom !== "object") s.lockerRoom = {};
+  if (!Number.isFinite(s.lockerRoom.heat)) s.lockerRoom.heat = 0;
+  if (!Number.isFinite(s.lockerRoom.suppressedUntilWeek)) s.lockerRoom.suppressedUntilWeek = 0;
+  if (!Number.isFinite(s.lockerRoom.influence)) s.lockerRoom.influence = 1;
+  if (!Number.isFinite(s.lockerRoom.lastInfluenceWeek)) s.lockerRoom.lastInfluenceWeek = 0;
+  if (!Array.isArray(s.lockerRoom.events)) s.lockerRoom.events = [];
   // Stats foundations for every player
   const ensureStats = (p) => {
     if (!p.seasonStats) p.seasonStats = { gp: 0, pts: 0, reb: 0, ast: 0, w: 0 };
@@ -227,10 +240,16 @@ function migrate(s) {
     }
     if (p.lastTeam === undefined) p.lastTeam = p.team || null;
   };
-  (s.roster || []).forEach(ensureStats);
-  (s.waived || []).forEach(ensureStats);
-  (s.freeAgents || []).forEach(ensureStats);
-  (s.teams || []).forEach((t) => (t.players || []).forEach(ensureStats));
+  const stampPersonality = (p) => {
+    ensureStats(p);
+    if (window.GAME_FACTORIES && window.GAME_FACTORIES.ensurePersonality) {
+      window.GAME_FACTORIES.ensurePersonality(p);
+    }
+  };
+  (s.roster || []).forEach(stampPersonality);
+  (s.waived || []).forEach(stampPersonality);
+  (s.freeAgents || []).forEach(stampPersonality);
+  (s.teams || []).forEach((t) => (t.players || []).forEach(stampPersonality));
   // Ensure injury field on every player record (fatigue field is left orphaned for backward compat)
   const ensureInjury = (p) => {
     if (p.injury === undefined) p.injury = null;
@@ -240,6 +259,8 @@ function migrate(s) {
   (s.freeAgents || []).forEach(ensureInjury);
   (s.teams || []).forEach((t) => (t.players || []).forEach(ensureInjury));
   ensurePickBoard(s);
+  rehomeOrphanUserPicks(s);
+  ensureUpcomingUserPick(s);
   return s;
 }
 function isRecord(value) {
@@ -338,6 +359,31 @@ function consumeDraftYearPicks(year, state) {
   s.pickBoard = (s.pickBoard || []).filter((pick) => pick.year !== year);
   syncPickCounts(s);
 }
+function ensureUpcomingUserPick(state) {
+  const s = state || S;
+  if (!s.team || !s.team.abbr) return;
+  if (!Array.isArray(s.pickBoard)) s.pickBoard = [];
+  const draftYear = (s.year || 2026) + 1;
+  const userId = s.team.abbr;
+  const hasOriginal = s.pickBoard.some(
+    (pick) => pick.original === userId && pick.year === draftYear,
+  );
+  if (!hasOriginal) {
+    s.pickBoard.push({
+      id: `${userId}-${draftYear}-1`,
+      year: draftYear,
+      round: 1,
+      original: userId,
+      owner: userId,
+    });
+  }
+  syncPickCounts(s);
+}
+function campRosterLimit() {
+  return S.offseason && (S.offseason.stage === "draft" || S.offseason.stage === "done")
+    ? DATA.rosterMax + 1
+    : DATA.rosterMax;
+}
 function findPick(id, state) {
   return (state || S).pickBoard.find((pick) => pick.id === id) || null;
 }
@@ -371,6 +417,24 @@ function reassignUserPicks(oldId, newId, state) {
     pick.id = `${pick.original}-${pick.year}-${pick.round}`;
   });
   syncPickCounts(s);
+}
+function rehomeOrphanUserPicks(state) {
+  const s = state || S;
+  if (!s.team || !s.team.abbr) return;
+  const userId = s.team.abbr;
+  const known = new Set((s.teams || []).map((team) => team.id));
+  known.add(userId);
+  let moved = false;
+  (s.pickBoard || []).forEach((pick) => {
+    const ownerMissing = pick.owner && !known.has(pick.owner);
+    const originalMissing = pick.original && !known.has(pick.original);
+    if (!ownerMissing && !originalMissing) return;
+    if (ownerMissing) pick.owner = userId;
+    if (originalMissing) pick.original = userId;
+    pick.id = `${pick.original}-${pick.year}-${pick.round}`;
+    moved = true;
+  });
+  if (moved) syncPickCounts(s);
 }
 function tradesLocked() {
   if (S.offseason) return false;
@@ -466,6 +530,11 @@ function normalizeSave(input) {
     },
     gamePlans: isRecord(s.coaching && s.coaching.gamePlans) ? s.coaching.gamePlans : {},
     pressLog: Array.isArray(s.coaching && s.coaching.pressLog) ? s.coaching.pressLog : [],
+  };
+  s.lockerRoom = {
+    ...base.lockerRoom,
+    ...(isRecord(s.lockerRoom) ? s.lockerRoom : {}),
+    events: Array.isArray(s.lockerRoom && s.lockerRoom.events) ? s.lockerRoom.events : [],
   };
   s.customRookies = isRecord(s.customRookies) ? s.customRookies : {};
   s.awards = Array.isArray(s.awards) ? s.awards : [];
@@ -728,6 +797,76 @@ function visibleGrade(p) {
   if (c >= 62) return "Depth";
   return "Fringe";
 }
+function personaEntry(kind, id) {
+  const pack = DATA.personality && DATA.personality[kind];
+  return pack && pack[id] ? pack[id] : null;
+}
+function personaLabel(id) {
+  const hit = personaEntry("public", id);
+  return hit ? hit.label : id || "";
+}
+function hiddenLabel(id) {
+  const hit = personaEntry("hidden", id);
+  return hit ? hit.label : id || "";
+}
+function personaChip(player) {
+  if (!player || !player.persona) return "";
+  return `<span class="pill info">${escapeHtml(personaLabel(player.persona))}</span>`;
+}
+function hiddenChip(player, owned) {
+  if (!player || !player.hiddenTrait || !owned) return "";
+  if (player.traitRevealed)
+    return `<span class="pill warn">${escapeHtml(hiddenLabel(player.hiddenTrait))}</span>`;
+  return `<span class="pill">Unconfirmed</span>`;
+}
+function chemistryFitChips(player) {
+  if (!player || !S.roster.length) return "";
+  const report = ENGINE.tensionReport(S.roster.concat([player]), DATA.personality || {});
+  const clashes = report.conflicts.filter((row) => row.aId === player.id || row.bId === player.id);
+  const syns = report.synergies.filter((row) => row.aId === player.id || row.bId === player.id);
+  const bits = [];
+  if (syns[0]) {
+    const other = syns[0].aId === player.id ? syns[0].b : syns[0].a;
+    bits.push(`<span class="pill good">Synergy with ${escapeHtml(other)}</span>`);
+  }
+  if (clashes[0]) {
+    const other = clashes[0].aId === player.id ? clashes[0].b : clashes[0].a;
+    bits.push(`<span class="pill warn">Clashes with ${escapeHtml(other)}</span>`);
+  }
+  return bits.join("");
+}
+function lockerKnobs() {
+  return BALANCE.lockerRoom || {};
+}
+function teamTensionScore(teamId) {
+  const players = healthyRotation(teamMeta(teamId).players, 8, teamId);
+  const report = ENGINE.tensionReport(players, DATA.personality || {});
+  const heat = teamId === S.team.abbr && S.lockerRoom ? S.lockerRoom.heat || 0 : 0;
+  return Math.max(0, Math.min(100, report.tension + heat));
+}
+function teamChemistryMult(teamId) {
+  const knobs = lockerKnobs();
+  const tension = teamTensionScore(teamId);
+  const suppressed =
+    teamId === S.team.abbr && S.lockerRoom && S.week < (S.lockerRoom.suppressedUntilWeek || 0);
+  const traits = (S.coaches && S.coaches.assistant && S.coaches.assistant.traits) || [];
+  const disciplinarian = teamId === S.team.abbr && traits.includes("disciplinarian");
+  return ENGINE.chemistryMultiplier(tension, {
+    suppressed,
+    disciplinarian,
+    scale: knobs.chemistryScale,
+    disciplinarianFactor: knobs.disciplinarianFactor,
+  });
+}
+function userLockerReport() {
+  const players = healthyRotation(S.roster, 8, S.team.abbr);
+  const report = ENGINE.tensionReport(players, DATA.personality || {});
+  return {
+    ...report,
+    tension: teamTensionScore(S.team.abbr),
+    chemistry: teamChemistryMult(S.team.abbr),
+  };
+}
 function portraitHtml(player, size) {
   const id = DATA.playerPhotos && DATA.playerPhotos[player.name];
   const initials = player.name
@@ -783,6 +922,8 @@ function rosterReadiness() {
         .join(", ")})`,
     );
   if (userSalary() > DATA.cap) issues.push("cap compliance");
+  if (S.roster.length > DATA.rosterMax)
+    issues.push(`cut ${S.roster.length - DATA.rosterMax} to reach ${DATA.rosterMax}`);
   return { ready: issues.length === 0, issues };
 }
 function requireOpeningNightReady() {
@@ -978,7 +1119,7 @@ function kpis() {
 function dashboard() {
   const best = bestPlayer();
   const weak = weakestPositionGroup();
-  return `${kpis()}${nextGameBrief()}<div class="layout2" style="margin-top:18px"><section class="card"><div class="sectionTitle"><h3>Owner Briefing</h3><span>Visible franchise pulse and next actions</span></div><div class="cardPad"><div class="layout3"><div><h3>${escapeHtml(S.team.city)} ${escapeHtml(S.team.nickname)}</h3><p class="muted">${escapeHtml(S.team.arena)}. You are building a one-season expansion roster under a simplified cap while protecting future optionality.</p><button class="btn" data-tab="${expansionDraftOpen() ? "draft" : "roster"}">${expansionDraftOpen() ? "Open Draft Room" : "Open Roster"}</button></div><div class="impact">${impactBars()}</div><div class="log"><div class="logItem"><b>Next opponent</b><p class="muted">${escapeHtml(nextOpponentSummary())}</p></div><div class="logItem"><b>Best player</b><p class="muted">${best ? escapeHtml(best.name) + " · " + escapeHtml(visibleGrade(best)) : "No roster yet."}</p></div><div class="logItem"><b>Weakest group</b><p class="muted">${escapeHtml(weak.pos)} depth · ${weak.count}</p></div><div class="logItem"><b>Recommended next move</b><p class="muted">${escapeHtml(recommendation())}</p></div></div></div></div></section><section class="card"><div class="sectionTitle"><h3>Front Office Feed</h3><span>${S.log.length} events</span></div><div class="cardPad log">${
+  return `${kpis()}${nextGameBrief()}<div class="layout2" style="margin-top:18px"><section class="card"><div class="sectionTitle"><h3>Owner Briefing</h3><span>Visible franchise pulse and next actions</span></div><div class="cardPad"><div class="layout3"><div><h3>${escapeHtml(S.team.city)} ${escapeHtml(S.team.nickname)}</h3><p class="muted">${escapeHtml(S.team.arena)}. You are building a one-season expansion roster under a simplified cap while protecting future optionality.</p><button class="btn" data-tab="${expansionDraftOpen() ? "draft" : "roster"}">${expansionDraftOpen() ? "Open Draft Room" : "Open Roster"}</button></div><div class="impact">${impactBars()}</div><div class="log"><div class="logItem"><b>Next opponent</b><p class="muted">${escapeHtml(nextOpponentSummary())}</p></div><div class="logItem"><b>Best player</b><p class="muted">${best ? escapeHtml(best.name) + " · " + escapeHtml(visibleGrade(best)) : "No roster yet."}</p></div><div class="logItem"><b>Weakest group</b><p class="muted">${escapeHtml(weak.pos)} depth · ${weak.count}</p></div><div class="logItem"><b>Recommended next move</b><p class="muted">${escapeHtml(recommendation())}</p></div><div class="logItem"><b>Locker room</b><p class="muted">${S.roster.length ? `Tension ${userLockerReport().tension} · chemistry ${Math.round(userLockerReport().chemistry * 100)}%` : "Draft a roster to start reading the room."}</p></div></div></div></div></section><section class="card"><div class="sectionTitle"><h3>Front Office Feed</h3><span>${S.log.length} events</span></div><div class="cardPad log">${
     S.log
       .slice(0, 8)
       .map(
@@ -1111,7 +1252,17 @@ function filteredDraftPool() {
       const q = draftFilters.q.toLowerCase();
       if (
         q &&
-        !(p.name + p.teamName + p.scouting + p.strengths + p.weaknesses).toLowerCase().includes(q)
+        !(
+          p.name +
+          p.teamName +
+          p.scouting +
+          p.strengths +
+          p.weaknesses +
+          (p.persona || "") +
+          personaLabel(p.persona)
+        )
+          .toLowerCase()
+          .includes(q)
       )
         return false;
       if (draftFilters.pos !== "ALL" && !p.pos.includes(draftFilters.pos)) return false;
@@ -1133,13 +1284,13 @@ function playerDraftCard(p) {
     p.protected ||
     S.roster.length >= DATA.expansionPickLimit ||
     userSalary() + p.salary > DATA.cap;
-  return `<div class="playerCard">${portraitHtml(p)}<div><div><span class="playerName">${escapeHtml(p.name)}</span> <span class="pill">${escapeHtml(p.pos)}</span> <span class="pill" style="${badgeStyle(p.teamObj.primary)}">${escapeHtml(p.team)}</span> ${p.protected ? '<span class="pill bad">Protected</span>' : ""}</div><div class="scout">${escapeHtml(p.scouting)}</div><div class="tags"><span class="tag">${visibleGrade(p)}</span><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${p.years} yr</span><span class="tag">${escapeHtml(p.archetype)}</span><span class="tag">Strength: ${escapeHtml(firstTag(p.strengths))}</span><span class="tag">Weakness: ${escapeHtml(firstTag(p.weaknesses))}</span></div></div><div class="actions"><button class="btn secondary" data-view="${escapeAttr(p.id)}">Scout</button><button class="btn ${disabled ? "secondary" : ""}" ${disabled ? "disabled" : ""} data-draft="${escapeAttr(p.id)}">${draftClosed ? "Draft Closed" : p.protected ? "Locked" : userSalary() + p.salary > DATA.cap ? "No Cap" : "Draft"}</button></div></div>`;
+  return `<div class="playerCard">${portraitHtml(p)}<div><div><span class="playerName">${escapeHtml(p.name)}</span> <span class="pill">${escapeHtml(p.pos)}</span> <span class="pill" style="${badgeStyle(p.teamObj.primary)}">${escapeHtml(p.team)}</span> ${p.protected ? '<span class="pill bad">Protected</span>' : ""} ${personaChip(p)}</div><div class="scout">${escapeHtml(p.scouting)}</div><div class="tags"><span class="tag">${visibleGrade(p)}</span><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${p.years} yr</span><span class="tag">${escapeHtml(p.archetype)}</span><span class="tag">Strength: ${escapeHtml(firstTag(p.strengths))}</span><span class="tag">Weakness: ${escapeHtml(firstTag(p.weaknesses))}</span>${chemistryFitChips(p)}</div></div><div class="actions"><button class="btn secondary" data-view="${escapeAttr(p.id)}">Scout</button><button class="btn ${disabled ? "secondary" : ""}" ${disabled ? "disabled" : ""} data-draft="${escapeAttr(p.id)}">${draftClosed ? "Draft Closed" : p.protected ? "Locked" : userSalary() + p.salary > DATA.cap ? "No Cap" : "Draft"}</button></div></div>`;
 }
 function roster() {
   return `${kpis()}<div class="layout2"><section class="card"><div class="sectionTitle"><h3>Cap Sheet</h3><span>${money(userSalary())} / ${money(DATA.cap)}</span></div>${rosterTable(S.roster)}</section><section class="card"><div class="sectionTitle"><h3>Roster Tools</h3><span>rotation control</span></div><div class="cardPad"><div class="impact">${impactBars()}</div><hr style="border:0;border-top:1px solid var(--line);margin:18px 0"><h3>Position Balance</h3>${positionBalance()}<h3>Recommended Next Move</h3><p class="muted">${recommendation()}</p></div></section></div>`;
 }
 function rosterTable(players) {
-  return `<table class="table"><thead><tr><th>Player</th><th>Pos</th><th>Role</th><th>Salary</th><th>Contract</th><th></th></tr></thead><tbody>${players.map((p) => `<tr><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div><div class="playerName">${escapeHtml(p.name)}</div><div class="mini">${escapeHtml(p.archetype)} · ${escapeHtml(firstTag(p.strengths))} · ${escapeHtml(firstTag(p.weaknesses))}</div></div></div></td><td>${escapeHtml(p.pos)}</td><td><span class="pill">${visibleGrade(p)}</span></td><td>${shortMoney(p.salary)}</td><td>${p.years} yr</td><td><button class="btn secondary" data-view="${escapeAttr(p.id)}">Scout</button> ${S.roster.find((x) => x.id === p.id) ? `<button class="btn danger" data-waive="${escapeAttr(p.id)}">Waive</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="6"><div class="empty">No players yet.</div></td></tr>`}</tbody></table>`;
+  return `<table class="table"><thead><tr><th>Player</th><th>Pos</th><th>Role</th><th>Salary</th><th>Contract</th><th></th></tr></thead><tbody>${players.map((p) => `<tr><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div><div class="playerName">${escapeHtml(p.name)}</div><div class="mini">${escapeHtml(p.archetype)} · ${personaLabel(p.persona) || "—"} · ${escapeHtml(firstTag(p.strengths))}</div></div></div></td><td>${escapeHtml(p.pos)}</td><td><span class="pill">${visibleGrade(p)}</span></td><td>${shortMoney(p.salary)}</td><td>${p.years} yr</td><td><button class="btn secondary" data-view="${escapeAttr(p.id)}">Scout</button> ${S.roster.find((x) => x.id === p.id) ? `<button class="btn danger" data-waive="${escapeAttr(p.id)}">Waive</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="6"><div class="empty">No players yet.</div></td></tr>`}</tbody></table>`;
 }
 function positionBalance() {
   return ["G", "F", "C"]
@@ -1383,7 +1534,7 @@ function waivers() {
       ? pool
           .map(
             (p) =>
-              `<div class="playerCard">${portraitHtml(p)}<div><span class="playerName">${escapeHtml(p.name)}</span> <span class="pill">${escapeHtml(p.pos)}</span><div class="scout">${escapeHtml(p.scouting)}</div><div class="tags"><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${visibleGrade(p)}</span><span class="tag">${escapeHtml(firstTag(p.strengths))}</span></div></div><button class="btn" data-sign="${escapeAttr(p.id)}" ${userSalary() + p.salary > DATA.cap ? "disabled" : ""}>${userSalary() + p.salary > DATA.cap ? "No Cap" : "Sign"}</button></div>`,
+              `<div class="playerCard">${portraitHtml(p)}<div><span class="playerName">${escapeHtml(p.name)}</span> <span class="pill">${escapeHtml(p.pos)}</span> ${personaChip(p)}<div class="scout">${escapeHtml(p.scouting)}</div><div class="tags"><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${visibleGrade(p)}</span><span class="tag">${escapeHtml(firstTag(p.strengths))}</span>${chemistryFitChips(p)}</div></div><button class="btn" data-sign="${escapeAttr(p.id)}" ${userSalary() + p.salary > DATA.cap ? "disabled" : ""}>${userSalary() + p.salary > DATA.cap ? "No Cap" : "Sign"}</button></div>`,
           )
           .join("")
       : '<div class="empty">No available free agents right now. Check back after roster moves or widen your criteria.</div>'
@@ -1579,7 +1730,7 @@ function generateYearlyWaivers(year) {
       iq: clampRating(base + rand(0, 10)),
       potential: clampRating(base + rand(-4, 4)),
     };
-    return {
+    const player = {
       id: `fa-${year}-${slug(name)}`,
       name,
       pos,
@@ -1597,6 +1748,10 @@ function generateYearlyWaivers(year) {
       injury: null,
       lastTeam: "FA",
     };
+    if (window.GAME_FACTORIES && window.GAME_FACTORIES.ensurePersonality) {
+      window.GAME_FACTORIES.ensurePersonality(player);
+    }
+    return player;
   });
 }
 function ensureSeason(force = false) {
@@ -1813,21 +1968,25 @@ function teamPower(id) {
   const off = Math.round((perO + intO) / 2);
   const def = Math.round((perD + intD) / 2);
   const reb = wavg("rebounding");
+  const chem = teamChemistryMult(id);
   const result = {
     overall: Math.round(
-      off * BALANCE.teamOverallWeights.offense +
+      (off * BALANCE.teamOverallWeights.offense +
         def * BALANCE.teamOverallWeights.defense +
-        reb * BALANCE.teamOverallWeights.rebounding,
+        reb * BALANCE.teamOverallWeights.rebounding) *
+        chem,
     ),
-    off,
-    def,
-    reb,
+    off: Math.round(off * chem),
+    def: Math.round(def * chem),
+    reb: Math.round(reb * chem),
     pace: wavg("athleticism"),
-    perO,
-    perD,
-    intO,
-    intD,
+    perO: Math.round(perO * chem),
+    perD: Math.round(perD * chem),
+    intO: Math.round(intO * chem),
+    intD: Math.round(intD * chem),
     depth: meta.players.length,
+    chemistry: chem,
+    tension: teamTensionScore(id),
   };
   if (_powerCacheOn) _powerCache[id] = result;
   return result;
@@ -2018,9 +2177,12 @@ function distributeAndRecord(id, ptsFor, won, accumulate = true) {
   // score. The previous version handed stars fixed chunks and let the remainder
   // go negative, so the box score never reconciled to the scoreboard.
   const slotW = BALANCE.statShareWeights;
+  const knobs = lockerKnobs();
+  const tension = teamTensionScore(id);
   const weights = healthy.map((p, i) => {
     const sc = (p.ratings && p.ratings.scoring) || 60;
-    return (slotW[i] ?? 0.14) * (0.6 + sc / 100) * (0.85 + random() * 0.3);
+    const freeze = ENGINE.statShareFactor(p, tension, knobs);
+    return (slotW[i] ?? 0.14) * (0.6 + sc / 100) * (0.85 + random() * 0.3) * freeze;
   });
   const pts = ENGINE.allocateIntegerTotal(weights, total);
   const rotation = healthy.map((p, i) => ({
@@ -2134,6 +2296,7 @@ function simulateGame(g) {
   if (g.home === S.team.abbr || g.away === S.team.abbr) {
     // Each user game advances the calendar: dev growth, market churn, injury healing, press.
     applyWeeklyTransition(g.week);
+    tickLockerRoom(g.week);
     marketChurn();
     maybeTriggerPress(g);
     // Consume Inspiring buff if it was set (it applied this game).
@@ -2578,7 +2741,11 @@ function modalHtml() {
   if (modal.type === "player") {
     const p = findPlayer(modal.id);
     if (!p) return "";
-    return `<div class="modalShade" data-modal-shade><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modalHeader"><div style="display:flex;gap:14px;align-items:center">${portraitHtml(p, "lg")}<h3 id="modal-title">${escapeHtml(p.name)} <span class="pill">${escapeHtml(p.pos)}</span></h3></div><button class="close" data-close aria-label="Close player scout">Close</button></div><div class="modalBody"><p>${escapeHtml(p.scouting)}</p><div class="layout2"><div><h3>Strengths</h3><p class="muted">${escapeHtml(p.strengths)}</p><h3>Weaknesses</h3><p class="muted">${escapeHtml(p.weaknesses)}</p><h3>Contract</h3><p class="muted">${shortMoney(p.salary)} · ${p.years} year(s) · ${p.protected ? "protected/core asset" : "available/negotiable"}</p></div><div><h3>Scouting Department View</h3><p class="muted">Numerical ratings are intentionally hidden in normal play. This panel reveals directional grades only.</p>${["scoring", "shooting", "playmaking", "defense", "rebounding", "athleticism", "iq", "potential"].map((k) => gradeRow(k, p.ratings[k])).join("")}</div></div></div></div></div>`;
+    const owned = S.roster.some((player) => player.id === p.id);
+    const persona = personaEntry("public", p.persona);
+    const hidden =
+      p.hiddenTrait && owned && p.traitRevealed ? personaEntry("hidden", p.hiddenTrait) : null;
+    return `<div class="modalShade" data-modal-shade><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modalHeader"><div style="display:flex;gap:14px;align-items:center">${portraitHtml(p, "lg")}<h3 id="modal-title">${escapeHtml(p.name)} <span class="pill">${escapeHtml(p.pos)}</span> ${personaChip(p)} ${hiddenChip(p, owned)}</h3></div><button class="close" data-close aria-label="Close player scout">Close</button></div><div class="modalBody"><p>${escapeHtml(p.scouting)}</p><div class="layout2"><div><h3>Persona</h3><p class="muted">${persona ? escapeHtml(persona.desc) : "Scouts have not tagged a public persona yet."}</p>${owned ? `<h3>Locker-room read</h3><p class="muted">${hidden ? escapeHtml(hidden.desc) : p.hiddenTrait ? "Something is off in the room, but it has not surfaced yet." : "No hidden flags on this player."}</p>` : ""}<h3>Strengths</h3><p class="muted">${escapeHtml(p.strengths)}</p><h3>Weaknesses</h3><p class="muted">${escapeHtml(p.weaknesses)}</p><h3>Contract</h3><p class="muted">${shortMoney(p.salary)} · ${p.years} year(s) · ${p.protected ? "protected/core asset" : "available/negotiable"}</p>${chemistryFitChips(p)}</div><div><h3>Scouting Department View</h3><p class="muted">Numerical ratings are intentionally hidden in normal play. This panel reveals directional grades only.</p>${["scoring", "shooting", "playmaking", "defense", "rebounding", "athleticism", "iq", "potential"].map((k) => gradeRow(k, p.ratings[k])).join("")}</div></div></div></div></div>`;
   }
   if (modal.type === "team") {
     const t = S.teams.find((x) => x.id === modal.id);
@@ -2737,9 +2904,12 @@ function bindDelegatedEvents() {
     } else if (control.id === "nickInput" || control.id === "arenaInput") {
       const nick = document.getElementById("nickInput");
       const arena = document.getElementById("arenaInput");
+      const previousAbbr = S.team.abbr;
       if (nick) S.team.nickname = nick.value;
       if (arena) S.team.arena = arena.value;
       S.team.abbr = abbr(S.team.city, S.team.nickname);
+      reassignUserPicks(previousAbbr, S.team.abbr);
+      rehomeOrphanUserPicks(S);
       save();
     } else if (control.id === "primaryInput" || control.id === "secondaryInput") {
       const primary = document.getElementById("primaryInput");
@@ -2792,10 +2962,13 @@ function bindDelegatedEvents() {
 }
 function applyCity(i) {
   const c = DATA.expansionCities[i];
+  const previousAbbr = S.team.abbr;
   S.team.city = c.city;
   S.team.nickname = c.nickname;
   S.team.arena = c.arena;
   S.team.abbr = abbr(c.city, c.nickname);
+  reassignUserPicks(previousAbbr, S.team.abbr);
+  rehomeOrphanUserPicks(S);
   render();
 }
 function actions(a) {
@@ -2804,7 +2977,9 @@ function actions(a) {
     const previousAbbr = S.team.abbr;
     S.team.abbr = uniqueUserAbbr(S.team.city, S.team.nickname);
     reassignUserPicks(previousAbbr, S.team.abbr);
+    rehomeOrphanUserPicks(S);
     ensurePickBoard(S);
+    ensureUpcomingUserPick(S);
     S.season = null;
     addLog(
       "Franchise approved",
@@ -2871,6 +3046,7 @@ function actions(a) {
   if (a === "enterOffseason") enterOffseason();
   if (a === "advanceToDraft") advanceToDraft();
   if (a === "startNextSeason") startNextSeason();
+  if (a === "mediateLockerRoom") mediateLockerRoom();
   if (a === "addCustomRookie") addCustomRookie();
   if (a === "commitDevFocus") {
     const pid = (document.getElementById("dev-player") || {}).value || null;
@@ -3096,7 +3272,7 @@ const AGING_RATINGS = [
   "athleticism",
   "iq",
 ];
-function ageOnePlayer(p) {
+function ageOnePlayer(p, teammates) {
   _compCache.delete(p);
   const before = composite(p);
   const delta = p.ratings.potential - before;
@@ -3129,6 +3305,19 @@ function ageOnePlayer(p) {
         deltas[k] = next - p.ratings[k];
         p.ratings[k] = next;
       }
+    }
+  }
+  const lockerBonus = ENGINE.mentorDevBonus(
+    [p].concat(teammates || []),
+    S.year,
+    DATA.personality || {},
+  )[p.id];
+  if (lockerBonus) {
+    const k = pickOne(AGING_RATINGS);
+    const next = clampRating(p.ratings[k] + 1);
+    if (next !== p.ratings[k]) {
+      deltas[k] = (deltas[k] || 0) + (next - p.ratings[k]);
+      p.ratings[k] = next;
     }
   }
   p.years = Math.max(0, p.years - 1);
@@ -3248,13 +3437,13 @@ function walkUserPlayer(id) {
 function applyOffseasonAging() {
   const reports = [];
   S.roster.forEach((p) => {
-    const r = ageOnePlayer(p);
+    const r = ageOnePlayer(p, S.roster);
     r.isUser = true;
     reports.push(r);
   });
   S.teams.forEach((t) =>
     t.players.forEach((p) => {
-      reports.push(ageOnePlayer(p));
+      reports.push(ageOnePlayer(p, t.players));
     }),
   );
   return reports;
@@ -3417,6 +3606,9 @@ function generateRookieClass(year) {
         age: 21 + rand(0, 2),
         injury: null,
       });
+      if (window.GAME_FACTORIES && window.GAME_FACTORIES.ensurePersonality) {
+        window.GAME_FACTORIES.ensurePersonality(out[out.length - 1]);
+      }
     }
   }
   return out;
@@ -3465,6 +3657,32 @@ function ratingsBottom(r) {
     .map(([k]) => RATING_LABELS_LOW[k])
     .join(", ");
 }
+function stampPlayerPersonality(player) {
+  if (window.GAME_FACTORIES && window.GAME_FACTORIES.ensurePersonality) {
+    window.GAME_FACTORIES.ensurePersonality(player);
+  }
+  return player;
+}
+function padRookieClass(rookieClass, draftOrder, year) {
+  let padded = rookieClass;
+  let guard = 0;
+  while (padded.length < draftOrder.length && guard++ < 6) {
+    const offset = padded.length;
+    const need = draftOrder.length - padded.length;
+    const batch = generateRookieClass(year)
+      .slice(0, need)
+      .map((player, i) => {
+        const copy = clone(player);
+        copy.id = `rookie-${year}-pad${offset + i}`;
+        stampPlayerPersonality(copy);
+        return copy;
+      });
+    if (!batch.length) break;
+    padded = padded.concat(batch);
+  }
+  padded.forEach(stampPlayerPersonality);
+  return padded;
+}
 function enterOffseason() {
   if (S.season && S.season.schedule.some((g) => !g.played)) {
     return toast("Finish all games before advancing to the offseason.");
@@ -3474,25 +3692,18 @@ function enterOffseason() {
   const expirations = resolveExpiredContracts();
   refreshWaiverClass(S.year + 1);
   runNpcFreeAgency();
+  rehomeOrphanUserPicks(S);
+  ensureUpcomingUserPick(S);
   const upcomingYear = S.year + 1;
   const draftOrder = buildDraftOrder();
   const base = S.year === 2026 ? clone(DATA.rookieClass2027) : generateRookieClass(upcomingYear);
   const dataExtras = (DATA.rookieClassExtras && DATA.rookieClassExtras[upcomingYear]) || [];
   const userExtras = (S.customRookies && S.customRookies[upcomingYear]) || [];
-  let rookieClass = base.concat(clone(dataExtras)).concat(clone(userExtras));
-  while (rookieClass.length < draftOrder.length) {
-    const offset = rookieClass.length;
-    const need = draftOrder.length - rookieClass.length;
-    const batch = generateRookieClass(upcomingYear)
-      .slice(0, need)
-      .map((player, i) => {
-        const copy = clone(player);
-        copy.id = `rookie-${upcomingYear}-pad${offset + i}`;
-        return copy;
-      });
-    if (!batch.length) break;
-    rookieClass = rookieClass.concat(batch);
-  }
+  const rookieClass = padRookieClass(
+    base.concat(clone(dataExtras)).concat(clone(userExtras)),
+    draftOrder,
+    upcomingYear,
+  );
   S.offseason = {
     stage: "aging",
     agingReport: reports,
@@ -3554,10 +3765,21 @@ function processAiPicks() {
   while (S.offseason.currentPickIdx < S.offseason.draftOrder.length) {
     const teamId = S.offseason.draftOrder[S.offseason.currentPickIdx];
     if (teamId === S.team.abbr) break;
-    const available = S.offseason.rookieClass.filter(
+    let available = S.offseason.rookieClass.filter(
       (p) => !S.offseason.picks.some((pk) => pk.playerId === p.id),
     );
-    const chosen = aiPickRookie(teamId, available);
+    let chosen = aiPickRookie(teamId, available);
+    if (!chosen) {
+      S.offseason.rookieClass = padRookieClass(
+        S.offseason.rookieClass,
+        S.offseason.draftOrder,
+        S.year + 1,
+      );
+      available = S.offseason.rookieClass.filter(
+        (p) => !S.offseason.picks.some((pk) => pk.playerId === p.id),
+      );
+      chosen = aiPickRookie(teamId, available);
+    }
     if (!chosen) break;
     S.offseason.picks.push({
       team: teamId,
@@ -3597,8 +3819,10 @@ function userPickRookie(playerId) {
   if (!S.offseason || S.offseason.stage !== "draft") return;
   if (S.offseason.draftOrder[S.offseason.currentPickIdx] !== S.team.abbr)
     return toast("Not your pick.");
-  if (S.roster.length >= DATA.rosterMax)
-    return toast(`Roster limit reached. Waive a player before making this pick.`);
+  if (S.roster.length >= campRosterLimit())
+    return toast(
+      `Training camp is full (${campRosterLimit()}). Waive a player before making this pick.`,
+    );
   const p = S.offseason.rookieClass.find((x) => x.id === playerId);
   if (!p || S.offseason.picks.some((pk) => pk.playerId === playerId)) return;
   recordUndo("rookie selection");
@@ -3733,18 +3957,22 @@ function offseasonDraftView() {
       return `<div class="logItem" style="${i === os.currentPickIdx ? "border-color:var(--orange);background:#fff6ee" : ""}${isUser && !picked ? ";box-shadow:inset 4px 0 0 var(--orange)" : ""}"><b>Pick #${i + 1}</b> <span class="teamBadge" style="${badgeStyle(meta.primary)}">${id}</span> ${escapeHtml(meta.name)}${isUser ? ' <span class="pill good">YOU</span>' : ""}${player ? `<div class="mini">→ ${escapeHtml(player.name)} · ${escapeHtml(player.pos)} · ${escapeHtml(player.team)}</div>` : i === os.currentPickIdx ? '<div class="mini">on the clock</div>' : '<div class="mini">upcoming</div>'}</div>`;
     })
     .join("");
-  const rosterFull = S.roster.length >= DATA.rosterMax;
-  const canDraft = userOnClock && !rosterFull;
+  const campFull = S.roster.length >= campRosterLimit();
+  const overOpening = S.roster.length >= DATA.rosterMax;
+  const canDraft = userOnClock && !campFull;
   const board = available
     .map((p) => {
       const photo = portraitHtml(p);
-      return `<div class="playerCard">${photo}<div><div><span class="playerName">${escapeHtml(p.name)}</span> <span class="pill">${escapeHtml(p.pos)}</span> <span class="pill">${escapeHtml(p.team)}</span></div><div class="scout">${escapeHtml(p.scouting)}</div><div class="tags"><span class="tag">${visibleGrade(p)}</span><span class="tag">Upside ${p.ratings.potential}</span><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${escapeHtml(firstTag(p.strengths))}</span></div></div><div class="actions"><button class="btn secondary" data-view="${escapeAttr(p.id)}">Scout</button><button class="btn ${canDraft ? "" : "secondary"}" ${canDraft ? "" : "disabled"} data-pick-rookie="${escapeAttr(p.id)}">${userOnClock ? (rosterFull ? "Roster full" : "Draft") : "Wait"}</button></div></div>`;
+      return `<div class="playerCard">${photo}<div><div><span class="playerName">${escapeHtml(p.name)}</span> <span class="pill">${escapeHtml(p.pos)}</span> <span class="pill">${escapeHtml(p.team)}</span> ${personaChip(p)}</div><div class="scout">${escapeHtml(p.scouting)}</div><div class="tags"><span class="tag">${visibleGrade(p)}</span><span class="tag">Upside ${p.ratings.potential}</span><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${escapeHtml(firstTag(p.strengths))}</span>${chemistryFitChips(p)}</div></div><div class="actions"><button class="btn secondary" data-view="${escapeAttr(p.id)}">Scout</button><button class="btn ${canDraft ? "" : "secondary"}" ${canDraft ? "" : "disabled"} data-pick-rookie="${escapeAttr(p.id)}">${userOnClock ? (campFull ? "Camp full" : overOpening ? "Draft (cut later)" : "Draft") : "Wait"}</button></div></div>`;
     })
     .join("");
-  const rosterNote =
-    userOnClock && rosterFull
-      ? `<div class="callout" style="margin-bottom:18px"><b>Roster is full (${DATA.rosterMax})</b><p class="muted">Waive a player on the Roster tab, then come back to make this pick.</p><div class="actions"><button class="btn secondary" data-tab="roster">Open Roster</button></div></div>`
-      : "";
+  const rosterNote = userOnClock
+    ? overOpening && !campFull
+      ? `<div class="callout" style="margin-bottom:18px"><b>Opening-night roster is full (${DATA.rosterMax})</b><p class="muted">You can still add one training-camp body with this pick. Cut back to ${DATA.rosterMax} before starting the next season.</p></div>`
+      : campFull
+        ? `<div class="callout" style="margin-bottom:18px"><b>Training camp is full (${campRosterLimit()})</b><p class="muted">Waive a player on the Roster tab, then come back to make this pick.</p><div class="actions"><button class="btn secondary" data-tab="roster">Open Roster</button></div></div>`
+        : ""
+    : "";
   return `<section class="card"><div class="sectionTitle"><h3>Rookie Draft · Year ${S.year + 1} Class</h3><span>${os.picks.length}/${os.draftOrder.length} picks made</span></div>${rosterNote}<div class="layout2"><div><div class="sectionTitle"><h3>On the Clock</h3><span><span class="teamBadge" style="${badgeStyle(onClockMeta.primary)}">${escapeHtml(onClock)}</span>${escapeHtml(onClockMeta.name)}${userOnClock ? " · YOUR PICK" : ""}</span></div><div class="board" style="max-height:720px">${board || '<div class="empty">Draft complete.</div>'}</div></div><div><div class="sectionTitle"><h3>Draft Order</h3><span>worst → best</span></div><div class="cardPad log" style="max-height:720px;overflow:auto">${orderHtml}</div></div></div></section>`;
 }
 function offseasonDoneView() {
@@ -4259,7 +4487,10 @@ function applyWeeklyTransition(week = S.week) {
         target.rookieYear !== undefined
           ? 0.2
           : 0;
-      S.coaches.devAccumulator = (S.coaches.devAccumulator || 0) + mult + mentorBonus + youngDev;
+      const lockerBonus =
+        ENGINE.mentorDevBonus(S.roster, S.year, DATA.personality || {})[target.id] || 0;
+      S.coaches.devAccumulator =
+        (S.coaches.devAccumulator || 0) + mult + mentorBonus + youngDev + lockerBonus;
       let pts = 0;
       while (S.coaches.devAccumulator >= 1 && target.ratings[k] < cap) {
         target.ratings[k] = Math.min(cap, (target.ratings[k] || 0) + 1);
@@ -4281,6 +4512,78 @@ function applyWeeklyTransition(week = S.week) {
     }
   }
   return true;
+}
+function pushLockerEvent(text) {
+  if (!S.lockerRoom) return;
+  S.lockerRoom.events.unshift({ week: S.week, year: S.year, text });
+  if (S.lockerRoom.events.length > 8) S.lockerRoom.events.length = 8;
+}
+function tickLockerRoom(week = S.week) {
+  if (!S.lockerRoom) return;
+  const knobs = lockerKnobs();
+  if (S.lockerRoom.lastInfluenceWeek !== week) {
+    S.lockerRoom.influence = knobs.influencePerWeek || 1;
+    S.lockerRoom.lastInfluenceWeek = week;
+    S.lockerRoom.heat = Math.max(0, (S.lockerRoom.heat || 0) - 4);
+  }
+  const report = userLockerReport();
+  const tension = report.tension;
+  S.roster.forEach((player) => {
+    if (
+      ENGINE.shouldRevealHidden(
+        player.hiddenTrait,
+        player.traitRevealed,
+        tension,
+        random(),
+        knobs.revealBase,
+      )
+    ) {
+      player.traitRevealed = true;
+      const label = hiddenLabel(player.hiddenTrait);
+      addLog("Locker room", `${player.name}'s ${label} is showing in the room.`);
+      pushLockerEvent(`${player.name}: ${label} revealed.`);
+    }
+  });
+  if (ENGINE.shouldBlowup(tension, random(), knobs.blowupTension, knobs.blowupChance)) {
+    const troublemakers = S.roster.filter((player) =>
+      ["drama-prone", "fragile-ego", "instigator", "selfish"].includes(player.hiddenTrait),
+    );
+    const pool = troublemakers.length ? troublemakers : S.roster;
+    const culprit = pool[Math.floor(random() * pool.length)];
+    if (culprit) {
+      if (culprit.hiddenTrait) culprit.traitRevealed = true;
+      culprit.mood = Math.max(20, (culprit.mood || 60) - 10);
+      S.roster.forEach((player) => {
+        if (player.id !== culprit.id) player.mood = Math.max(20, (player.mood || 60) - 2);
+      });
+      S.lockerRoom.heat = Math.min(40, (S.lockerRoom.heat || 0) + 12);
+      const label = culprit.hiddenTrait
+        ? hiddenLabel(culprit.hiddenTrait)
+        : personaLabel(culprit.persona);
+      addLog("Locker room blowup", `${culprit.name} (${label}) set the room on edge.`);
+      pushLockerEvent(`Blowup: ${culprit.name} (${label}).`);
+    }
+  }
+}
+function mediateLockerRoom() {
+  if (!S.started) return toast("Start a franchise first.");
+  if (!S.lockerRoom) return;
+  if ((S.lockerRoom.influence || 0) < 1) return toast("No influence left this week.");
+  if (S.week < (S.lockerRoom.suppressedUntilWeek || 0))
+    return toast("The last mediation is still holding.");
+  recordUndo("locker-room mediation");
+  const knobs = lockerKnobs();
+  S.lockerRoom.influence -= 1;
+  S.lockerRoom.suppressedUntilWeek = S.week + (knobs.suppressWeeks || 2);
+  S.lockerRoom.heat = Math.max(0, (S.lockerRoom.heat || 0) - 20);
+  S.roster.forEach((player) => {
+    player.mood = Math.max(20, Math.min(99, (player.mood || 60) + 3));
+  });
+  addLog("Mediation", "Front office sat the room down. Tension is cooling for a couple of weeks.");
+  pushLockerEvent("Front office mediated a dispute.");
+  toast("Locker room mediated.");
+  save();
+  render();
 }
 function rollInjuries(g) {
   const checkTeam = (id) => {
@@ -4402,8 +4705,47 @@ function respondToPress(optId) {
   save();
   render();
 }
+function lockerRoomSection() {
+  const report = userLockerReport();
+  const knobs = lockerKnobs();
+  const influence = S.lockerRoom ? S.lockerRoom.influence || 0 : 0;
+  const suppressed =
+    S.lockerRoom && S.week < (S.lockerRoom.suppressedUntilWeek || 0)
+      ? `Mediation holding through week ${S.lockerRoom.suppressedUntilWeek - 1}.`
+      : "No active mediation.";
+  const asstTraits = (S.coaches && S.coaches.assistant && S.coaches.assistant.traits) || [];
+  const disc = asstTraits.includes("disciplinarian")
+    ? `<p class="muted">${escapeHtml(S.coaches.assistant.name)} is keeping the chemistry penalty to 40%.</p>`
+    : `<p class="muted">Hire a Strict Disciplinarian assistant to blunt high-tension rosters.</p>`;
+  const conflictHtml = report.conflicts.length
+    ? report.conflicts
+        .slice(0, 4)
+        .map(
+          (row) =>
+            `<div class="mini">${escapeHtml(row.a)} vs ${escapeHtml(row.b)} · ${escapeHtml(personaLabel(row.traits[0]) || hiddenLabel(row.traits[0]))} / ${escapeHtml(personaLabel(row.traits[1]) || hiddenLabel(row.traits[1]))}</div>`,
+        )
+        .join("")
+    : '<div class="mini">No active clashes in the top eight.</div>';
+  const synHtml = report.synergies.length
+    ? report.synergies
+        .slice(0, 3)
+        .map(
+          (row) =>
+            `<div class="mini">${escapeHtml(row.a)} + ${escapeHtml(row.b)} · ${escapeHtml(row.type)}</div>`,
+        )
+        .join("")
+    : '<div class="mini">No mentor/glue pairings firing yet.</div>';
+  const events = ((S.lockerRoom && S.lockerRoom.events) || [])
+    .slice(0, 4)
+    .map(
+      (event) =>
+        `<div class="logItem"><b>Week ${event.week}</b><p class="muted">${escapeHtml(event.text)}</p></div>`,
+    )
+    .join("");
+  return `<section class="card"><div class="sectionTitle"><h3>Locker Room</h3><span>tension ${report.tension} · chem ${Math.round(report.chemistry * 100)}%</span></div><div class="cardPad"><div class="meter"><span>Team tension</span><div class="bar"><i style="width:${report.tension}%"></i></div><b>${report.tension}</b></div><p class="muted">${suppressed} Influence this week: ${influence}/${knobs.influencePerWeek || 1}.</p>${disc}<div class="layout2" style="margin-top:12px"><div><h3>Clashes</h3>${conflictHtml}</div><div><h3>Synergies</h3>${synHtml}</div></div><div class="actions" style="margin-top:14px"><button class="btn" data-action="mediateLockerRoom" ${influence < 1 ? "disabled" : ""}>Mediate dispute</button></div><div class="log" style="margin-top:14px">${events || '<div class="empty">No locker-room events yet. Play games to surface hidden traits.</div>'}</div></div></section>`;
+}
 function coachingView() {
-  return `${kpis()}${coachingStaffSection()}<div style="margin-top:18px">${nextGamesSection()}</div><div class="layout2" style="margin-top:18px"><div>${weeklyFocusSection()}${devFocusSection()}</div><div>${pressSection()}${injurySection()}</div></div>`;
+  return `${kpis()}${coachingStaffSection()}<div style="margin-top:18px">${lockerRoomSection()}</div><div style="margin-top:18px">${nextGamesSection()}</div><div class="layout2" style="margin-top:18px"><div>${weeklyFocusSection()}${devFocusSection()}</div><div>${pressSection()}${injurySection()}</div></div>`;
 }
 function faCoachPool(role) {
   const pool = (DATA.coachCandidates && DATA.coachCandidates[role]) || [];
@@ -4687,6 +5029,7 @@ function addCustomRookie() {
     age: 22,
     injury: null,
   });
+  stampPlayerPersonality(S.customRookies[year][S.customRookies[year].length - 1]);
   save();
   toast(`${name} added to ${year} draft class.`);
   render();
@@ -4801,6 +5144,20 @@ if (typeof module !== "undefined" && module.exports) {
     expansionDraftOpen,
     applyBulkCoaching,
     rotationMood,
+    ENGINE,
+    personaLabel,
+    hiddenLabel,
+    userLockerReport,
+    teamChemistryMult,
+    teamTensionScore,
+    mediateLockerRoom,
+    tickLockerRoom,
+    ensureUpcomingUserPick,
+    rehomeOrphanUserPicks,
+    reassignUserPicks,
+    applyCity,
+    campRosterLimit,
+    padRookieClass,
     get S() {
       return S;
     },
