@@ -303,7 +303,7 @@ test("playoff box scores do not accumulate regular-season stats", () => {
   );
 });
 
-test("weekly focus bonus only applies during the focus week", () => {
+test("weekly focus bonus stays applied until the user clears it", () => {
   const g = loadGame(11);
   g.S.started = true;
   g.S.week = 3;
@@ -312,22 +312,29 @@ test("weekly focus bonus only applies during the focus week", () => {
   const [home, away] = [g.S.team.abbr, g.S.teams[0].id];
   g.S.roster = [mkPlayer(80, { id: "u1", pos: "G" })];
   g.S.rngState = 99;
-  const withFocus = g.simScore(home, away, { id: "G-focus", week: 3 });
+  const weekThree = g.simScore(home, away, { id: "G-focus", week: 3 });
   g.S.rngState = 99;
-  const withoutFocus = g.simScore(home, away, { id: "G-later", week: 4 });
+  const weekFour = g.simScore(home, away, { id: "G-later", week: 4 });
+  assert.deepStrictEqual(
+    { hs: weekThree.hs, as: weekThree.as },
+    { hs: weekFour.hs, as: weekFour.as },
+  );
+  g.S.coaching.weeklyFocus = "none";
+  g.S.rngState = 99;
+  const cleared = g.simScore(home, away, { id: "G-cleared", week: 5 });
   assert.notDeepStrictEqual(
-    { hs: withFocus.hs, as: withFocus.as },
-    { hs: withoutFocus.hs, as: withoutFocus.as },
+    { hs: weekThree.hs, as: weekThree.as },
+    { hs: cleared.hs, as: cleared.as },
   );
 });
 
-test("maybeResetWeeklyFocus clears last week's plan", () => {
+test("maybeResetWeeklyFocus leaves the current focus in place", () => {
   const g = loadGame(1);
   g.S.coaching.weeklyFocus = "intD";
   g.S.coaching.focusWeek = 2;
   g.maybeResetWeeklyFocus(3);
-  assert.strictEqual(g.S.coaching.weeklyFocus, "none");
-  assert.strictEqual(g.S.coaching.focusWeek, null);
+  assert.strictEqual(g.S.coaching.weeklyFocus, "intD");
+  assert.strictEqual(g.S.coaching.focusWeek, 2);
 });
 
 test("opening-night gate does not block a season already underway", () => {
@@ -592,4 +599,68 @@ test("compact awards keep MIP, All-League, record, and playoff result", () => {
   assert.strictEqual(packed.playoffResult, "Champion");
   assert.strictEqual(packed.mip.name, "Star");
   assert.strictEqual(packed.allLeague[0].name, "Star");
+});
+
+function closedSeason(g, rosterSize) {
+  g.S.started = true;
+  g.S.year = 2026;
+  g.S.phase = "2026 Regular Season";
+  g.ensurePickBoard(g.S);
+  g.S.roster = Array.from({ length: rosterSize }, (_, i) =>
+    mkPlayer(70, {
+      id: "r" + i,
+      pos: i % 3 === 0 ? "C" : i % 2 === 0 ? "F" : "G",
+      salary: 200000,
+      years: 2,
+    }),
+  );
+  const ids = [g.S.team.abbr, ...g.S.teams.map((t) => t.id)];
+  g.S.season = {
+    schedule: [{ id: "G1", played: true, week: 1, home: g.S.team.abbr, away: g.S.teams[0].id }],
+    records: Object.fromEntries(ids.map((id) => [id, { w: 0, l: 0, pf: 0, pa: 0, streak: "—" }])),
+    results: ["G1"],
+  };
+}
+
+test("year-two rookie draft keeps the user on the clock", () => {
+  const g = loadGame(1);
+  closedSeason(g, 11);
+  g.enterOffseason();
+  assert.ok(g.S.offseason.draftOrder.includes(g.S.team.abbr));
+  assert.ok(g.S.offseason.rookieClass.length >= g.S.offseason.draftOrder.length);
+  g.S.offseason.pendingResign = [];
+  g.S.offseason.stage = "draft";
+  g.processAiPicks();
+  assert.strictEqual(g.S.offseason.stage, "draft");
+  assert.strictEqual(g.S.offseason.draftOrder[g.S.offseason.currentPickIdx], g.S.team.abbr);
+  const avail = g.S.offseason.rookieClass.find(
+    (p) => !g.S.offseason.picks.some((pk) => pk.playerId === p.id),
+  );
+  g.userPickRookie(avail.id);
+  assert.ok(g.S.roster.some((p) => p.id === avail.id));
+});
+
+test("startPlayer puts a bench player into the top eight", () => {
+  const g = loadGame(1);
+  g.S.roster = Array.from({ length: 12 }, (_, i) =>
+    mkPlayer(90 - i * 3, { id: "p" + i, pos: "G" }),
+  );
+  g.S.rotation = [];
+  g.ensureUserRotation();
+  g.startPlayer("p11");
+  const top = g.healthyRotation(g.S.roster, 8, g.S.team.abbr).map((p) => p.id);
+  assert.ok(top.includes("p11"));
+  assert.strictEqual(top[7], "p11");
+});
+
+test("moveRotation can raise a player who started outside the top eight", () => {
+  const g = loadGame(1);
+  g.S.roster = Array.from({ length: 12 }, (_, i) =>
+    mkPlayer(90 - i * 3, { id: "p" + i, pos: "G" }),
+  );
+  g.S.rotation = [];
+  g.ensureUserRotation();
+  g.moveRotation("p8", -1);
+  assert.strictEqual(g.S.rotation[7], "p8");
+  assert.strictEqual(g.S.rotation[8], "p7");
 });

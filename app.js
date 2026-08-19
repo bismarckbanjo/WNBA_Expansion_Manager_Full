@@ -1713,13 +1713,18 @@ function healthyRotation(players, n, ownerId) {
 }
 function ensureUserRotation() {
   if (!Array.isArray(S.rotation)) S.rotation = [];
-  S.rotation = S.rotation.filter((id) => S.roster.some((p) => p.id === id));
-  if (S.rotation.length) return S.rotation;
-  S.rotation = S.roster
+  const rosterIds = new Set(S.roster.map((p) => p.id));
+  S.rotation = S.rotation.filter((id) => rosterIds.has(id));
+  const seen = new Set(S.rotation);
+  S.roster
     .slice()
     .sort((a, b) => composite(b) - composite(a))
-    .slice(0, 8)
-    .map((p) => p.id);
+    .forEach((p) => {
+      if (!seen.has(p.id)) {
+        S.rotation.push(p.id);
+        seen.add(p.id);
+      }
+    });
   return S.rotation;
 }
 function moveRotation(id, delta) {
@@ -1736,13 +1741,20 @@ function moveRotation(id, delta) {
 }
 function sitPlayer(id) {
   ensureUserRotation();
-  S.rotation = S.rotation.filter((item) => item !== id);
+  const idx = S.rotation.indexOf(id);
+  if (idx < 0) return;
+  const copy = S.rotation.slice();
+  copy.splice(idx, 1);
+  copy.push(id);
+  S.rotation = copy;
   renderView();
 }
 function startPlayer(id) {
   ensureUserRotation();
   if (!S.roster.some((p) => p.id === id)) return;
-  if (!S.rotation.includes(id)) S.rotation.push(id);
+  const copy = S.rotation.filter((item) => item !== id);
+  copy.splice(Math.min(7, copy.length), 0, id);
+  S.rotation = copy;
   renderView();
 }
 function teamPower(id) {
@@ -1875,11 +1887,7 @@ function simScore(home, away, game) {
   const userIs = home === S.team.abbr ? "h" : away === S.team.abbr ? "a" : null;
   if (userIs && S.coaching) {
     const m = mod[userIs];
-    const focusApplies =
-      S.coaching.weeklyFocus &&
-      S.coaching.weeklyFocus !== "none" &&
-      game &&
-      (S.coaching.focusWeek === game.week || S.coaching.bulkFocus);
+    const focusApplies = S.coaching.weeklyFocus && S.coaching.weeklyFocus !== "none";
     const f = focusApplies ? S.coaching.weeklyFocus : null;
     const asstTraits = (S.coaches && S.coaches.assistant && S.coaches.assistant.traits) || [];
     const filmBuff = asstTraits.includes("film-buff") ? 1 : 0;
@@ -2336,7 +2344,7 @@ function nextGameHero(g) {
   const planBlock = gp.scouted
     ? `<div class="actions" style="margin-top:10px"><button class="btn ${gp.plan === "pack" ? "" : "secondary"}" data-plan="${g.id}|pack">Pack the Paint</button><button class="btn ${gp.plan === "extend" ? "" : "secondary"}" data-plan="${g.id}|extend">Extend Defense</button>${gp.plan ? `<button class="btn ghost" data-plan="${g.id}|none">Clear plan</button>` : ""}</div>`
     : "";
-  return `<section class="card" style="margin-bottom:18px"><div class="sectionTitle"><h3>Next Game · Week ${g.week} · ${isHome ? "vs" : "at"} ${opp.name}</h3><span>${opp.id} ${oppRec.w}-${oppRec.l}</span></div><div class="cardPad"><div class="layout2"><div><h3 style="margin:0">${isHome ? "Home" : "Road"} · ${opp.name}</h3><p class="muted">Plan: <b>${gp.plan === "pack" ? "Pack the Paint" : gp.plan === "extend" ? "Extend Defense" : "Not set"}</b> · Weekly focus: <b>${focusLabel}</b></p>${scoutBlock}${planBlock}</div><div class="actions" style="justify-content:flex-end;align-items:flex-end;flex-direction:column;gap:10px"><button class="btn" data-action="simNext" style="font-size:15px;padding:14px 18px">Game Day →</button><button class="btn secondary" data-action="simWeek">Sim Current Week (skip prep)</button></div></div></div></section>`;
+  return `<section class="card" style="margin-bottom:18px"><div class="sectionTitle"><h3>Next Game · Week ${g.week} · ${isHome ? "vs" : "at"} ${opp.name}</h3><span>${opp.id} ${oppRec.w}-${oppRec.l}</span></div><div class="cardPad"><div class="layout2"><div><h3 style="margin:0">${isHome ? "Home" : "Road"} · ${opp.name}</h3><p class="muted">Plan: <b>${gp.plan === "pack" ? "Pack the Paint" : gp.plan === "extend" ? "Extend Defense" : "Not set"}</b> · Coaching focus: <b>${focusLabel}</b></p>${scoutBlock}${planBlock}</div><div class="actions" style="justify-content:flex-end;align-items:flex-end;flex-direction:column;gap:10px"><button class="btn" data-action="simNext" style="font-size:15px;padding:14px 18px">Game Day →</button><button class="btn secondary" data-action="simWeek">Sim Current Week (skip prep)</button></div></div></div></section>`;
 }
 function myGameCard(g) {
   const isHome = g.home === S.team.abbr;
@@ -2374,12 +2382,12 @@ function gameDayView() {
     plan: null,
   };
   ensureUserRotation();
-  const topRotation = healthyRotation(S.roster, 8, S.team.abbr);
-  const bench = S.roster.filter(
-    (p) => !p.injury && !topRotation.some((starter) => starter.id === p.id),
-  );
+  const ordered = healthyRotation(S.roster, null, S.team.abbr);
+  const topRotation = ordered.slice(0, 8);
+  const bench = ordered.slice(8);
   const injuredRotation = S.roster.filter((p) => p.injury);
-  const injuredCount = S.roster.filter((p) => p.injury).length;
+  const injuredCount = injuredRotation.length;
+  const lastHealthyIdx = Math.max(0, ordered.length - 1);
   const recommendedPlan = recommendPlan(oppPower);
   const recLine =
     recommendedPlan === "pack"
@@ -2395,14 +2403,16 @@ function gameDayView() {
     `<tr ${role === "injured" ? 'style="opacity:.5"' : ""}><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div class="playerName">${escapeHtml(p.name)}</div></div></td><td>${escapeHtml(p.pos)}</td><td>${injuryBadge(p)}</td><td>${p.mood || 60}</td><td>${p.age || "—"}</td><td class="actions">${
       role === "injured"
         ? ""
-        : role === "start"
-          ? `<button class="btn ghost" data-rotate-up="${escapeAttr(p.id)}" ${idx === 0 ? "disabled" : ""}>Up</button><button class="btn ghost" data-rotate-down="${escapeAttr(p.id)}" ${idx === topRotation.length - 1 ? "disabled" : ""}>Down</button><button class="btn secondary" data-sit="${escapeAttr(p.id)}">Sit</button>`
-          : `<button class="btn secondary" data-start="${escapeAttr(p.id)}">Start</button>`
+        : `${`<button class="btn ghost" data-rotate-up="${escapeAttr(p.id)}" ${idx === 0 ? "disabled" : ""}>Up</button><button class="btn ghost" data-rotate-down="${escapeAttr(p.id)}" ${idx === lastHealthyIdx ? "disabled" : ""}>Down</button>`}${
+            role === "start"
+              ? `<button class="btn secondary" data-sit="${escapeAttr(p.id)}">Sit</button>`
+              : `<button class="btn secondary" data-start="${escapeAttr(p.id)}">Start</button>`
+          }`
     }</td></tr>`;
-  const rotationTable = `<table class="table"><thead><tr><th>Player</th><th>Pos</th><th>Status</th><th>Mood</th><th>Age</th><th></th></tr></thead><tbody>${topRotation.map((p, idx) => rotationRow(p, "start", idx)).join("")}${bench.map((p) => rotationRow(p, "bench")).join("")}${injuredRotation
+  const rotationTable = `<table class="table"><thead><tr><th>Player</th><th>Pos</th><th>Status</th><th>Mood</th><th>Age</th><th></th></tr></thead><tbody>${topRotation.map((p, idx) => rotationRow(p, "start", idx)).join("")}${bench.map((p, i) => rotationRow(p, "bench", i + topRotation.length)).join("")}${injuredRotation
     .map((p) => rotationRow(p, "injured"))
     .join("")}</tbody></table>`;
-  return `<section class="card"><div class="sectionTitle"><h3>Game Day · Week ${g.week} · ${isHome ? "vs" : "at"} ${opp.name}</h3><span>${opp.id} ${oppRec.w}-${oppRec.l}</span></div><div class="cardPad"><div class="layout2"><section><h3 style="margin-top:0">Opponent</h3><p class="muted">${opp.name} · ${oppRec.w}-${oppRec.l} · power index ${oppPower.overall}</p>${scoutBlock}<h3 style="margin-top:18px">Your Game Plan</h3>${planBlock}</section><section><h3 style="margin-top:0">Your Prep</h3><p class="muted">Weekly Focus: <b>${currentFocusLabel()}</b></p><p class="muted">Plan: <b>${gp.plan === "pack" ? "Pack the Paint" : gp.plan === "extend" ? "Extend Defense" : "Not set"}</b></p><p class="muted">Power Index: <b>${myPower.overall}</b> · Per ${myPower.perO}/${myPower.perD} · Int ${myPower.intO}/${myPower.intD}</p><p class="muted">Injured players: <b>${injuredCount}</b></p></section></div><h3 style="margin-top:18px">Your Rotation</h3><p class="muted">Sit/start and reorder the eight who play. Injured players cannot be activated.</p>${rotationTable}<div class="actions" style="margin-top:18px"><button class="btn" data-action="playQueuedGame" style="font-size:15px;padding:14px 20px">Play Game →</button><button class="btn secondary" data-action="closeGameDay">Hold Off</button></div></div></section>`;
+  return `<section class="card"><div class="sectionTitle"><h3>Game Day · Week ${g.week} · ${isHome ? "vs" : "at"} ${opp.name}</h3><span>${opp.id} ${oppRec.w}-${oppRec.l}</span></div><div class="cardPad"><div class="layout2"><section><h3 style="margin-top:0">Opponent</h3><p class="muted">${opp.name} · ${oppRec.w}-${oppRec.l} · power index ${oppPower.overall}</p>${scoutBlock}<h3 style="margin-top:18px">Your Game Plan</h3>${planBlock}</section><section><h3 style="margin-top:0">Your Prep</h3><p class="muted">Coaching Focus: <b>${currentFocusLabel()}</b></p><p class="muted">Plan: <b>${gp.plan === "pack" ? "Pack the Paint" : gp.plan === "extend" ? "Extend Defense" : "Not set"}</b></p><p class="muted">Power Index: <b>${myPower.overall}</b> · Per ${myPower.perO}/${myPower.perD} · Int ${myPower.intO}/${myPower.intD}</p><p class="muted">Injured players: <b>${injuredCount}</b></p></section></div><h3 style="margin-top:18px">Your Rotation</h3><p class="muted">Reorder the full depth chart. The first eight healthy names play. Injured players cannot be activated.</p>${rotationTable}<div class="actions" style="margin-top:18px"><button class="btn" data-action="playQueuedGame" style="font-size:15px;padding:14px 20px">Play Game →</button><button class="btn secondary" data-action="closeGameDay">Hold Off</button></div></div></section>`;
 }
 function findAnyGame(gameId) {
   const reg = S.season && S.season.schedule.find((x) => x.id === gameId);
@@ -3465,11 +3475,24 @@ function enterOffseason() {
   refreshWaiverClass(S.year + 1);
   runNpcFreeAgency();
   const upcomingYear = S.year + 1;
+  const draftOrder = buildDraftOrder();
   const base = S.year === 2026 ? clone(DATA.rookieClass2027) : generateRookieClass(upcomingYear);
   const dataExtras = (DATA.rookieClassExtras && DATA.rookieClassExtras[upcomingYear]) || [];
   const userExtras = (S.customRookies && S.customRookies[upcomingYear]) || [];
-  const rookieClass = base.concat(clone(dataExtras)).concat(clone(userExtras));
-  const draftOrder = buildDraftOrder(rookieClass.length);
+  let rookieClass = base.concat(clone(dataExtras)).concat(clone(userExtras));
+  while (rookieClass.length < draftOrder.length) {
+    const offset = rookieClass.length;
+    const need = draftOrder.length - rookieClass.length;
+    const batch = generateRookieClass(upcomingYear)
+      .slice(0, need)
+      .map((player, i) => {
+        const copy = clone(player);
+        copy.id = `rookie-${upcomingYear}-pad${offset + i}`;
+        return copy;
+      });
+    if (!batch.length) break;
+    rookieClass = rookieClass.concat(batch);
+  }
   S.offseason = {
     stage: "aging",
     agingReport: reports,
@@ -3502,7 +3525,7 @@ function advanceToDraft() {
   render();
   if (S.offseason.stage === "draft") setTimeout(processAiPicks, 250);
 }
-function buildDraftOrder(classSize) {
+function buildDraftOrder(_classSize) {
   const draftYear = S.year + 1;
   const standings = standingsRows().slice().reverse();
   const rank = Object.fromEntries(standings.map((row, index) => [row.id, index]));
@@ -3514,8 +3537,8 @@ function buildDraftOrder(classSize) {
       String(a.id).localeCompare(String(b.id)),
   );
   const order = picks.map((pick) => pick.owner);
-  if (order.length) return order.slice(0, classSize);
-  return standings.map((row) => row.id).slice(0, classSize);
+  if (order.length) return order;
+  return standings.map((row) => row.id);
 }
 function resumeOffseasonDraft() {
   if (!S.offseason || S.offseason.stage !== "draft") return;
@@ -3710,13 +3733,19 @@ function offseasonDraftView() {
       return `<div class="logItem" style="${i === os.currentPickIdx ? "border-color:var(--orange);background:#fff6ee" : ""}${isUser && !picked ? ";box-shadow:inset 4px 0 0 var(--orange)" : ""}"><b>Pick #${i + 1}</b> <span class="teamBadge" style="${badgeStyle(meta.primary)}">${id}</span> ${escapeHtml(meta.name)}${isUser ? ' <span class="pill good">YOU</span>' : ""}${player ? `<div class="mini">→ ${escapeHtml(player.name)} · ${escapeHtml(player.pos)} · ${escapeHtml(player.team)}</div>` : i === os.currentPickIdx ? '<div class="mini">on the clock</div>' : '<div class="mini">upcoming</div>'}</div>`;
     })
     .join("");
+  const rosterFull = S.roster.length >= DATA.rosterMax;
+  const canDraft = userOnClock && !rosterFull;
   const board = available
     .map((p) => {
       const photo = portraitHtml(p);
-      return `<div class="playerCard">${photo}<div><div><span class="playerName">${escapeHtml(p.name)}</span> <span class="pill">${escapeHtml(p.pos)}</span> <span class="pill">${escapeHtml(p.team)}</span></div><div class="scout">${escapeHtml(p.scouting)}</div><div class="tags"><span class="tag">${visibleGrade(p)}</span><span class="tag">Upside ${p.ratings.potential}</span><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${escapeHtml(firstTag(p.strengths))}</span></div></div><div class="actions"><button class="btn secondary" data-view="${escapeAttr(p.id)}">Scout</button><button class="btn ${userOnClock ? "" : "secondary"}" ${userOnClock ? "" : "disabled"} data-pick-rookie="${escapeAttr(p.id)}">${userOnClock ? "Draft" : "Wait"}</button></div></div>`;
+      return `<div class="playerCard">${photo}<div><div><span class="playerName">${escapeHtml(p.name)}</span> <span class="pill">${escapeHtml(p.pos)}</span> <span class="pill">${escapeHtml(p.team)}</span></div><div class="scout">${escapeHtml(p.scouting)}</div><div class="tags"><span class="tag">${visibleGrade(p)}</span><span class="tag">Upside ${p.ratings.potential}</span><span class="tag">${shortMoney(p.salary)}</span><span class="tag">${escapeHtml(firstTag(p.strengths))}</span></div></div><div class="actions"><button class="btn secondary" data-view="${escapeAttr(p.id)}">Scout</button><button class="btn ${canDraft ? "" : "secondary"}" ${canDraft ? "" : "disabled"} data-pick-rookie="${escapeAttr(p.id)}">${userOnClock ? (rosterFull ? "Roster full" : "Draft") : "Wait"}</button></div></div>`;
     })
     .join("");
-  return `<section class="card"><div class="sectionTitle"><h3>Rookie Draft · Year ${S.year + 1} Class</h3><span>${os.picks.length}/${os.draftOrder.length} picks made</span></div><div class="layout2"><div><div class="sectionTitle"><h3>On the Clock</h3><span><span class="teamBadge" style="${badgeStyle(onClockMeta.primary)}">${escapeHtml(onClock)}</span>${escapeHtml(onClockMeta.name)}${userOnClock ? " · YOUR PICK" : ""}</span></div><div class="board" style="max-height:720px">${board || '<div class="empty">Draft complete.</div>'}</div></div><div><div class="sectionTitle"><h3>Draft Order</h3><span>worst → best</span></div><div class="cardPad log" style="max-height:720px;overflow:auto">${orderHtml}</div></div></div></section>`;
+  const rosterNote =
+    userOnClock && rosterFull
+      ? `<div class="callout" style="margin-bottom:18px"><b>Roster is full (${DATA.rosterMax})</b><p class="muted">Waive a player on the Roster tab, then come back to make this pick.</p><div class="actions"><button class="btn secondary" data-tab="roster">Open Roster</button></div></div>`
+      : "";
+  return `<section class="card"><div class="sectionTitle"><h3>Rookie Draft · Year ${S.year + 1} Class</h3><span>${os.picks.length}/${os.draftOrder.length} picks made</span></div>${rosterNote}<div class="layout2"><div><div class="sectionTitle"><h3>On the Clock</h3><span><span class="teamBadge" style="${badgeStyle(onClockMeta.primary)}">${escapeHtml(onClock)}</span>${escapeHtml(onClockMeta.name)}${userOnClock ? " · YOUR PICK" : ""}</span></div><div class="board" style="max-height:720px">${board || '<div class="empty">Draft complete.</div>'}</div></div><div><div class="sectionTitle"><h3>Draft Order</h3><span>worst → best</span></div><div class="cardPad log" style="max-height:720px;overflow:auto">${orderHtml}</div></div></div></section>`;
 }
 function offseasonDoneView() {
   const os = S.offseason;
@@ -4139,7 +4168,7 @@ const FOCUS_OPTIONS = [
   {
     id: "perO",
     label: "Perimeter Offense",
-    desc: "Shooting, spacing, ball movement. +2 to your team's perimeter offense this week.",
+    desc: "Shooting, spacing, ball movement. +2 to your team's perimeter offense.",
     icon: "○",
   },
   {
@@ -4163,7 +4192,7 @@ const FOCUS_OPTIONS = [
   {
     id: "film",
     label: "Film Study",
-    desc: "Watch tape. +1 to all four channels this week.",
+    desc: "Watch tape. +1 to all four channels.",
     icon: "▶",
   },
 ];
@@ -4174,17 +4203,8 @@ function setWeeklyFocus(id) {
   save();
   render();
 }
-function maybeResetWeeklyFocus(week) {
-  if (
-    S.coaching &&
-    S.coaching.focusWeek !== null &&
-    S.coaching.focusWeek !== undefined &&
-    week > S.coaching.focusWeek &&
-    S.coaching.weeklyFocus !== "none"
-  ) {
-    S.coaching.weeklyFocus = "none";
-    S.coaching.focusWeek = null;
-  }
+function maybeResetWeeklyFocus(_week) {
+  // Coaching focus stays until the user changes it.
 }
 function clearAllInjuries() {
   const clear = (player) => {
@@ -4478,7 +4498,7 @@ function weeklyFocusSection() {
     (f) =>
       `<button type="button" class="cityTile ${cur === f.id ? "selected" : ""}" data-focus="${f.id}" role="radio" aria-checked="${cur === f.id}"><strong>${f.icon} ${f.label}</strong><small>${f.desc}</small></button>`,
   ).join("");
-  return `<section class="card"><div class="sectionTitle"><h3>This Week's Focus</h3><span>Week ${S.week} · applies to your games this week</span></div><div class="cardPad"><div class="tiles" role="radiogroup" aria-label="Weekly coaching focus">${tiles}</div></div></section>`;
+  return `<section class="card"><div class="sectionTitle"><h3>Coaching Focus</h3><span>stays until you change it</span></div><div class="cardPad"><div class="tiles" role="radiogroup" aria-label="Coaching focus">${tiles}</div></div></section>`;
 }
 function nextGamesSection() {
   const games = userUpcomingGames(3);
@@ -4776,6 +4796,8 @@ if (typeof module !== "undefined" && module.exports) {
     enterOffseason,
     sitPlayer,
     startPlayer,
+    moveRotation,
+    ensureUserRotation,
     expansionDraftOpen,
     applyBulkCoaching,
     rotationMood,
