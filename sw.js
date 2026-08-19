@@ -1,4 +1,4 @@
-const CACHE_NAME = "baseline-shell-v3";
+const CACHE_NAME = "baseline-shell-v4";
 const CORE_ASSETS = [
   "./",
   "./index.html",
