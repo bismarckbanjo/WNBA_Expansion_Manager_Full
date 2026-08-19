@@ -14,6 +14,13 @@ function stableMood(name, teamId) {
   return 55 + (Math.abs(hash) % 30);
 }
 
+function stableAge(name, teamId) {
+  const value = slug(`${name}-${teamId}-age`);
+  let hash = 0;
+  for (let i = 0; i < value.length; i++) hash = (hash * 31 + value.charCodeAt(i)) | 0;
+  return 22 + (Math.abs(hash) % 13);
+}
+
 function team(id, name, primary, secondary, status, players) {
   return { id, name, primary, secondary, status, players };
 }
@@ -61,10 +68,11 @@ function p(
     },
     archetype,
     mood: stableMood(name, teamId),
+    age: stableAge(name, teamId),
     injury: null,
   };
 }
 
 // Reference the cross-script globals so static analysis understands that these
 // factories are intentionally consumed by data.js.
-window.GAME_FACTORIES = { team, p, slug };
+window.GAME_FACTORIES = { team, p, slug, stableMood, stableAge };

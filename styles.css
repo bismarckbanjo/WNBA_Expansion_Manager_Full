@@ -710,6 +710,38 @@ a:focus-visible {
   align-items: center;
   font-size: 13px;
 }
+.seasonStepper {
+  margin: 0 0 16px;
+}
+.seasonStepper ol {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.seasonStepper li {
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.seasonStepper li.done {
+  background: #e9f6ee;
+  color: var(--green);
+  border-color: #cfe8d7;
+}
+.seasonStepper li.current {
+  background: var(--user1);
+  color: var(--userText);
+  border-color: var(--user1);
+}
 @media (max-width: 1050px) {
   .appShell {
     grid-template-columns: 1fr;

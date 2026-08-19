@@ -50,7 +50,10 @@ const itDom = JSDOM ? test : (name, fn) => test(name, { skip: true }, () => {});
 
 itDom("app boots and renders the setup screen without errors", () => {
   const w = boot();
-  assert.ok(w.document.getElementById("app").innerHTML.length > 0);
+  const html = w.document.getElementById("app").innerHTML;
+  assert.ok(html.length > 0);
+  assert.match(html, /Continue a franchise/);
+  assert.ok(w.document.getElementById("saveImport"), "setup should expose import");
 });
 
 itDom("full season + playoffs sim runs and renders without throwing", () => {
@@ -60,6 +63,8 @@ itDom("full season + playoffs sim runs and renders without throwing", () => {
   w.simSeason(); // simulate every scheduled game
   // Drive into the playoffs and finish them.
   assert.doesNotThrow(() => w.enterPlayoffs());
+  w.document.querySelector('[data-tab="schedule"]').click();
+  assert.match(w.document.getElementById("app").innerHTML, /Semifinals/);
   assert.doesNotThrow(() => w.simPlayoffsToEnd());
   // Switch to the Season tab — this renders recentResults(), which previously
   // crashed because playoff game ids are pushed into S.season.results but were
@@ -67,7 +72,14 @@ itDom("full season + playoffs sim runs and renders without throwing", () => {
   const scheduleBtn = w.document.querySelector('[data-tab="schedule"]');
   assert.ok(scheduleBtn, "schedule tab button should exist");
   assert.doesNotThrow(() => scheduleBtn.click());
-  assert.ok(w.document.getElementById("app").innerHTML.length > 0);
+  const html = w.document.getElementById("app").innerHTML;
+  assert.ok(html.length > 0);
+  assert.ok(
+    !w.document.querySelector('[data-tab="draft"]'),
+    "expansion draft nav should hide after opening night",
+  );
+  assert.match(html, /seasonStepper/);
+  assert.match(html, /Awards/);
 });
 
 itDom("a malicious team nickname is HTML-escaped in the live DOM", () => {
@@ -205,6 +217,19 @@ itDom("rookie draft resumes AI picks after a mid-draft reload", () => {
   const os = w.document.getElementById("app").textContent;
   assert.match(os, /Test Rookie/);
   assert.match(os, /YOUR PICK|on the clock|Draft complete/);
+});
+
+itDom("trade desk lists year-stamped picks instead of a flavor checkbox", () => {
+  const w = boot();
+  w.actions("start");
+  buildOpeningRoster(w);
+  const tradeBtn = w.document.querySelector('[data-tab="trades"]');
+  assert.ok(tradeBtn);
+  tradeBtn.click();
+  const html = w.document.getElementById("app").innerHTML;
+  assert.match(html, /1st|First-round slot/);
+  assert.ok(!html.includes("Request their future 2nd-round pick"));
+  assert.match(html, /Review Trade/);
 });
 
 itDom("named save slots can be created without losing the current franchise", () => {

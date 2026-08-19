@@ -1,5 +1,7 @@
 # WNBA Expansion Manager — Full Build + Season Sim
 
+Play at https://wnba.meehanyou.com — progress stays in that browser. Export a save from Admin (or the setup screen) before switching devices or clearing site data.
+
 Launch directly by opening `index.html`, or run the local server below to enable offline installation:
 
 ```sh
@@ -13,7 +15,7 @@ Then open `http://localhost:8080`.
 - Expansion team setup with preset cities, custom nickname, arena, and color inputs
 - Expansion draft room with protected players, cap checks, scouting notes, and hidden ratings
 - Roster/cap dashboard with position balance and recommended next move
-- Trade desk with multi-player trades, pick sweeteners, salary validation, team needs, and protected-player logic
+- Trade desk with multi-player trades, year-stamped draft picks, NPC offers, a deadline, salary validation, team needs, and protected-player logic
 - Waiver wire with low-cost players and re-signing logic
 - Season Command tab with generated schedule, standings, next-game simulation, week simulation, full-season simulation, and recent finals
 - Sim engine using hidden roster ratings for offense, defense, rebounding, top-player weighting, home advantage, and random variance

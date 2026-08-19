@@ -6,7 +6,7 @@ const LS_KEY = "wnbaExpansionFullBuild.v2";
 const ACTIVE_SLOT_KEY = "wnbaExpansion.activeSlot.v1";
 const SAVE_INDEX_KEY = "wnbaExpansion.saveIndex.v1";
 const SLOT_PREFIX = "wnbaExpansion.slot.v1.";
-const SAVE_VERSION = 4;
+const SAVE_VERSION = 5;
 const money = (n) => "$" + Math.round(n).toLocaleString();
 const shortMoney = (n) =>
   n >= 1000000
@@ -70,11 +70,13 @@ let trade = {
   team: "ATL",
   userGive: [],
   otherGive: [],
+  userPicks: [],
+  otherPicks: [],
   userPick: 0,
   otherPick: 0,
   query: "",
 };
-let lastUndo = null;
+let undoStack = [];
 let modalReturnFocusSelector = null;
 let pendingImport = null;
 function freshState() {
@@ -96,6 +98,10 @@ function freshState() {
     roster: [],
     waived: [],
     picks: { you: 3, league: 2 },
+    pickBoard: [],
+    rotation: [],
+    pendingOffers: [],
+    faClassYear: 2026,
     season: null,
     year: 2026,
     saveVersion: SAVE_VERSION,
@@ -162,6 +168,12 @@ function migrate(s) {
     if (!Array.isArray(s.customRookies[year])) s.customRookies[year] = [];
   });
   if (!Array.isArray(s.freeAgents)) s.freeAgents = [];
+  if (!Array.isArray(s.rotation)) s.rotation = [];
+  if (!Array.isArray(s.pendingOffers)) s.pendingOffers = [];
+  if (!Number.isFinite(s.faClassYear)) s.faClassYear = s.year || 2026;
+  if (s.offseason && typeof s.offseason === "object" && !Array.isArray(s.offseason.pendingResign)) {
+    s.offseason.pendingResign = [];
+  }
   if (s.season && typeof s.season === "object") {
     if (!Array.isArray(s.season.schedule)) s.season = null;
     else {
@@ -209,9 +221,15 @@ function migrate(s) {
     if (!p.seasonStats) p.seasonStats = { gp: 0, pts: 0, reb: 0, ast: 0, w: 0 };
     if (p.compositeAtStart === undefined) p.compositeAtStart = null;
     if (p.rookieYear === undefined) p.rookieYear = null;
+    if (!Number.isFinite(p.age)) {
+      const factoryAge = window.GAME_FACTORIES && window.GAME_FACTORIES.stableAge;
+      p.age = factoryAge ? factoryAge(p.name || "player", p.team || "FA") : 26;
+    }
+    if (p.lastTeam === undefined) p.lastTeam = p.team || null;
   };
   (s.roster || []).forEach(ensureStats);
   (s.waived || []).forEach(ensureStats);
+  (s.freeAgents || []).forEach(ensureStats);
   (s.teams || []).forEach((t) => (t.players || []).forEach(ensureStats));
   // Ensure injury field on every player record (fatigue field is left orphaned for backward compat)
   const ensureInjury = (p) => {
@@ -219,7 +237,9 @@ function migrate(s) {
   };
   (s.roster || []).forEach(ensureInjury);
   (s.waived || []).forEach(ensureInjury);
+  (s.freeAgents || []).forEach(ensureInjury);
   (s.teams || []).forEach((t) => (t.players || []).forEach(ensureInjury));
+  ensurePickBoard(s);
   return s;
 }
 function isRecord(value) {
@@ -230,6 +250,134 @@ function isValidPlayer(player) {
 }
 function isValidTeam(team) {
   return SCHEMA.isValidTeam(team, PLAYER_RATING_KEYS);
+}
+function isValidPick(pick) {
+  return !!(
+    isRecord(pick) &&
+    typeof pick.id === "string" &&
+    Number.isInteger(pick.year) &&
+    (pick.round === 1 || pick.round === 2) &&
+    typeof pick.original === "string" &&
+    typeof pick.owner === "string"
+  );
+}
+function buildDefaultPickBoard(year, userId, teams) {
+  const board = [];
+  const ids = [userId, ...(teams || []).map((team) => team.id)];
+  ids.forEach((id) => {
+    [1, 2].forEach((offset) => {
+      const pickYear = year + offset;
+      board.push({
+        id: `${id}-${pickYear}-1`,
+        year: pickYear,
+        round: 1,
+        original: id,
+        owner: id,
+      });
+    });
+  });
+  board.push({
+    id: `${userId}-${year + 1}-2`,
+    year: year + 1,
+    round: 2,
+    original: userId,
+    owner: userId,
+  });
+  return board;
+}
+function ownedPicks(ownerId, state) {
+  const s = state || S;
+  return (s.pickBoard || []).filter((pick) => pick.owner === ownerId);
+}
+function syncPickCounts(state) {
+  const s = state || S;
+  if (!isRecord(s.picks)) s.picks = { you: 0, league: 0 };
+  const userId = s.team && s.team.abbr;
+  s.picks.you = ownedPicks(userId, s).length;
+  s.picks.league = (s.pickBoard || []).filter((pick) => pick.owner && pick.owner !== userId).length;
+}
+function ensurePickBoard(state) {
+  const s = state || S;
+  if (!s.team || !s.team.abbr) return;
+  if (!Array.isArray(s.pickBoard) || !s.pickBoard.length) {
+    s.pickBoard = buildDefaultPickBoard(s.year || 2026, s.team.abbr, s.teams || []);
+    if (isRecord(s.picks) && Number.isInteger(s.picks.you)) {
+      const userOwned = ownedPicks(s.team.abbr, s);
+      if (s.picks.you < userOwned.length) {
+        userOwned.slice(s.picks.you).forEach((pick) => {
+          const fallback = (s.teams && s.teams[0] && s.teams[0].id) || pick.owner;
+          pick.owner = fallback;
+        });
+      }
+    }
+  }
+  syncPickCounts(s);
+}
+function grantUpcomingPicks(state) {
+  const s = state || S;
+  if (!Array.isArray(s.pickBoard)) s.pickBoard = [];
+  const horizon = (s.year || 2026) + 2;
+  const ids = [s.team.abbr, ...(s.teams || []).map((team) => team.id)];
+  ids.forEach((id) => {
+    if (
+      !s.pickBoard.some((pick) => pick.original === id && pick.year === horizon && pick.round === 1)
+    ) {
+      s.pickBoard.push({
+        id: `${id}-${horizon}-1`,
+        year: horizon,
+        round: 1,
+        original: id,
+        owner: id,
+      });
+    }
+  });
+  syncPickCounts(s);
+}
+function consumeDraftYearPicks(year, state) {
+  const s = state || S;
+  s.pickBoard = (s.pickBoard || []).filter((pick) => pick.year !== year);
+  syncPickCounts(s);
+}
+function findPick(id, state) {
+  return (state || S).pickBoard.find((pick) => pick.id === id) || null;
+}
+function pickLabel(pick) {
+  if (!pick) return "Pick";
+  const round = pick.round === 1 ? "1st" : "2nd";
+  return `${pick.year} ${round}${pick.original && pick.original !== pick.owner ? ` (via ${pick.original})` : ""}`;
+}
+function pickTradeValue(pick) {
+  if (!pick) return 0;
+  const yearsOut = Math.max(0, pick.year - ((S && S.year) || pick.year) - 1);
+  const base = pick.round === 1 ? BALANCE.trade.pickRound1 : BALANCE.trade.pickRound2;
+  return base + yearsOut * BALANCE.trade.pickYearBonus;
+}
+function selectedPicks(side) {
+  const ids = trade[side === "user" ? "userPicks" : "otherPicks"] || [];
+  if (ids.length) return ids.map((id) => findPick(id)).filter(Boolean);
+  if (side === "user" && trade.userPick) return ownedPicks(S.team.abbr).slice(0, 1);
+  if (side === "other" && trade.otherPick) {
+    const partnerId = trade.team;
+    return ownedPicks(partnerId).slice(0, 1);
+  }
+  return [];
+}
+function reassignUserPicks(oldId, newId, state) {
+  const s = state || S;
+  if (!oldId || !newId || oldId === newId) return;
+  (s.pickBoard || []).forEach((pick) => {
+    if (pick.owner === oldId) pick.owner = newId;
+    if (pick.original === oldId) pick.original = newId;
+    pick.id = `${pick.original}-${pick.year}-${pick.round}`;
+  });
+  syncPickCounts(s);
+}
+function tradesLocked() {
+  if (S.offseason) return false;
+  if (!S.season || !Array.isArray(S.season.schedule)) return false;
+  if (S.phase === "Expansion Build") return false;
+  const deadline = BALANCE.tradeDeadlineWeek || 12;
+  return S.week > deadline && S.season.schedule.some((game) => game.played);
 }
 // Validate the complete shape used by render and the simulation before imported
 // state can replace the current save. This is intentionally stricter than a
@@ -265,6 +413,9 @@ function isValidSave(s) {
     Object.values(s.customRookies).every((list) => Array.isArray(list)) &&
     Array.isArray(s.freeAgents) &&
     s.freeAgents.every(isValidPlayer) &&
+    (!s.pickBoard || (Array.isArray(s.pickBoard) && s.pickBoard.every(isValidPick))) &&
+    (!s.rotation || Array.isArray(s.rotation)) &&
+    (!s.pendingOffers || Array.isArray(s.pendingOffers)) &&
     Number.isFinite(s.year) &&
     !s.teams.some((team) => team.id === s.team.abbr) &&
     isValidSeason(s.season) &&
@@ -319,8 +470,11 @@ function normalizeSave(input) {
   s.customRookies = isRecord(s.customRookies) ? s.customRookies : {};
   s.awards = Array.isArray(s.awards) ? s.awards : [];
   s.freeAgents = Array.isArray(s.freeAgents) ? s.freeAgents : [];
+  s.rotation = Array.isArray(s.rotation) ? s.rotation : [];
+  s.pendingOffers = Array.isArray(s.pendingOffers) ? s.pendingOffers : [];
   if (typeof s.year !== "number" || !Number.isFinite(s.year)) s.year = 2026;
   s.team.abbr = uniqueAbbrAgainst(s.team.abbr, s.team.city, s.team.nickname, s.teams);
+  ensurePickBoard(s);
   return isValidSave(s) ? s : null;
 }
 function load() {
@@ -479,7 +633,7 @@ function createSaveSlot() {
   save();
   activeSlotId = `${slug(name) || "franchise"}-${Date.now().toString(36)}`;
   S.saveName = name;
-  lastUndo = null;
+  undoStack = [];
   save();
   toast(`Saved a copy as “${name}”.`);
   render();
@@ -494,7 +648,7 @@ function loadSaveSlot(id) {
     localStorage.setItem(ACTIVE_SLOT_KEY, id);
     resetFaBase();
     S = incoming;
-    lastUndo = null;
+    undoStack = [];
     tab = S.started ? "dashboard" : "setup";
     render();
     resumeOffseasonDraft();
@@ -609,7 +763,7 @@ function checkObjectives() {
     if (o.id === "roster11") o.done = S.roster.length >= 11;
     if (o.id === "positions") o.done = groups.G && groups.F && groups.C;
     if (o.id === "cap") o.done = userSalary() <= DATA.cap;
-    if (o.id === "future") o.done = S.picks.you >= 2;
+    if (o.id === "future") o.done = ownedPicks(S.team.abbr).length >= 2;
   });
 }
 function rosterReadiness() {
@@ -641,18 +795,27 @@ function requireOpeningNightReady() {
     return true;
   const readiness = rosterReadiness();
   if (readiness.ready) return true;
-  tab = "draft";
+  tab = expansionDraftOpen() ? "draft" : "roster";
   render();
   toast(`Opening night needs ${readiness.issues.join(" and ")}.`);
   return false;
 }
+function expansionDraftOpen() {
+  return S.phase === "Expansion Build";
+}
+function offseasonStageLabel(stage) {
+  if (stage === "aging") return "Aging report";
+  if (stage === "contracts") return "Free agency";
+  if (stage === "draft") return "Rookie draft";
+  return "Complete";
+}
 function recordUndo(label) {
-  lastUndo = { label, state: clone(S) };
+  undoStack.unshift({ label, state: clone(S) });
+  if (undoStack.length > (BALANCE.undoLimit || 5)) undoStack.length = BALANCE.undoLimit || 5;
 }
 function undoLastMove() {
-  if (!lastUndo) return toast("There is no move to undo.");
-  const previous = lastUndo;
-  lastUndo = null;
+  const previous = undoStack.shift();
+  if (!previous) return toast("There is no move to undo.");
   S = normalizeSave(previous.state) || S;
   toast(`${previous.label} undone.`);
   render();
@@ -720,7 +883,7 @@ function renderView() {
   queueSave();
 }
 function shell() {
-  return `<div class="appShell"><aside class="side"><div class="brand"><div class="logo"></div><div><h1>${escapeHtml(S.team.city)} ${escapeHtml(S.team.nickname)}</h1><p>Expansion Front Office</p></div></div><nav class="nav" aria-label="Primary navigation">${navBtn("dashboard", "Dashboard")} ${navBtn("draft", "Expansion Draft")} ${navBtn("roster", "Roster")} ${navBtn("schedule", "Season")} ${navBtn("trades", "Trade Desk")} ${navBtn("waivers", "Waivers")} ${navBtn("coaching", "Coaching")} ${navBtn("league", "League")} ${navBtn("history", "History")} ${navBtn("admin", "Admin")}</nav><div class="sideCard"><div class="mini">Front Office Score</div><div class="big">${frontOfficeScore()}</div><p>${frontOfficeNote()}</p><p class="mini">${frontOfficeDrivers()}</p></div></aside><main class="main" id="main-content">${topbar()}<div id="view-content">${content()}</div>${modalHtml()}</main></div>`;
+  return `<div class="appShell"><aside class="side"><div class="brand"><div class="logo"></div><div><h1>${escapeHtml(S.team.city)} ${escapeHtml(S.team.nickname)}</h1><p>Expansion Front Office</p></div></div><nav class="nav" aria-label="Primary navigation">${navBtn("dashboard", "Dashboard")} ${expansionDraftOpen() ? navBtn("draft", "Expansion Draft") : ""} ${navBtn("roster", "Roster")} ${navBtn("schedule", "Season")} ${navBtn("trades", "Trade Desk")} ${navBtn("waivers", "Waivers")} ${navBtn("coaching", "Coaching")} ${navBtn("league", "League")} ${navBtn("history", "History")} ${navBtn("admin", "Admin")}</nav><div class="sideCard"><div class="mini">Front Office Score</div><div class="big">${frontOfficeScore()}</div><p>${frontOfficeNote()}</p><p class="mini">${frontOfficeDrivers()}</p></div></aside><main class="main" id="main-content">${topbar()}<div id="view-content">${content()}</div>${modalHtml()}</main></div>`;
 }
 function navBtn(id, label) {
   return `<button data-tab="${id}" class="${tab === id ? "active" : ""}"><span>${label}</span><b>${navBadge(id)}</b></button>`;
@@ -728,7 +891,7 @@ function navBtn(id, label) {
 function navBadge(id) {
   if (id === "draft") return `${S.roster.length}/${DATA.expansionPickLimit}`;
   if (id === "schedule") return `${seasonRecord(S.team.abbr).w}-${seasonRecord(S.team.abbr).l}`;
-  if (id === "trades") return S.picks.you;
+  if (id === "trades") return ownedPicks(S.team.abbr).length;
   if (id === "waivers") return S.waived.length;
   if (id === "coaching" && S.coaching && S.coaching.pendingPress) return "!";
   return "";
@@ -748,9 +911,13 @@ function topbar() {
     admin: "Admin · Custom Rookies",
     awards: "Season Awards",
   };
-  const title = S.offseason ? "Offseason " + S.year : titles[tab];
+  const title = S.offseason
+    ? "Offseason " + S.year
+    : S.pendingAwards && tab === "schedule"
+      ? "Season Awards"
+      : titles[tab];
   const sub = S.offseason
-    ? `Stage: ${S.offseason.stage === "aging" ? "Aging report" : S.offseason.stage === "draft" ? "Rookie draft" : "Complete"} · Year ${S.year} → ${S.year + 1}`
+    ? `Stage: ${offseasonStageLabel(S.offseason.stage)} · Year ${S.year} → ${S.year + 1}`
     : `${S.phase} · Year ${S.year} · Week ${S.week} · Simplified cap ${money(DATA.cap)}`;
   // Hide the topbar "Play Next Game" when the main pane already has a primary
   // action button (Game Day / post-game / offseason / awards) — avoids two
@@ -769,26 +936,29 @@ function topbar() {
     : readiness.ready
       ? `<button class="btn secondary" data-action="simNext">Play Next Game →</button>`
       : `<button class="btn secondary" data-tab="draft">Complete Roster · ${S.roster.length}/${DATA.rosterMin}</button>`;
-  const undoBtn = lastUndo
-    ? `<button class="btn ghost" data-action="undo">Undo ${escapeHtml(lastUndo.label)}</button>`
+  const undoBtn = undoStack[0]
+    ? `<button class="btn ghost" data-action="undo">Undo ${escapeHtml(undoStack[0].label)}</button>`
     : "";
   return `<div class="topbar"><div><h2>${title}</h2><p>${sub}</p></div><div class="actions">${playBtn}${undoBtn}<button class="btn secondary" data-action="reset">New Save</button></div></div>`;
 }
 function content() {
   // Offseason takes over only the Schedule tab so the user can still navigate
   // to Roster, Trades, Coaching, etc. while in the aging / rookie draft flow.
-  if (S.offseason && tab === "schedule") return offseasonView();
-  if (S.offseason && tab === "offseason") return offseasonView();
-  if (tab === "awards") return S.pendingAwards ? awardsView() : schedulePage();
-  if (S.postGame && tab === "schedule") return postGameView();
-  if (S.gameDay && tab === "schedule") return gameDayView();
-  if (S.playoffs && S.playoffs.active && tab === "schedule") return playoffsView();
+  if (S.offseason && (tab === "schedule" || tab === "offseason" || tab === "awards"))
+    return seasonStepper() + offseasonView();
+  if (S.pendingAwards && (tab === "schedule" || tab === "awards"))
+    return seasonStepper() + awardsView();
+  if (S.postGame && tab === "schedule") return seasonStepper() + postGameView();
+  if (S.gameDay && tab === "schedule") return seasonStepper() + gameDayView();
+  if (S.playoffs && S.playoffs.active && tab === "schedule")
+    return seasonStepper() + playoffsView();
+  if (tab === "schedule") return seasonStepper() + schedulePage();
   return (
     {
       dashboard: dashboard(),
       draft: draft(),
       roster: roster(),
-      schedule: schedulePage(),
+      schedule: seasonStepper() + schedulePage(),
       trades: trades(),
       waivers: waivers(),
       league: league(),
@@ -808,7 +978,7 @@ function kpis() {
 function dashboard() {
   const best = bestPlayer();
   const weak = weakestPositionGroup();
-  return `${kpis()}${nextGameBrief()}<div class="layout2" style="margin-top:18px"><section class="card"><div class="sectionTitle"><h3>Owner Briefing</h3><span>Visible franchise pulse and next actions</span></div><div class="cardPad"><div class="layout3"><div><h3>${escapeHtml(S.team.city)} ${escapeHtml(S.team.nickname)}</h3><p class="muted">${escapeHtml(S.team.arena)}. You are building a one-season expansion roster under a simplified cap while protecting future optionality.</p><button class="btn" data-tab="draft">Open Draft Room</button></div><div class="impact">${impactBars()}</div><div class="log"><div class="logItem"><b>Next opponent</b><p class="muted">${escapeHtml(nextOpponentSummary())}</p></div><div class="logItem"><b>Best player</b><p class="muted">${best ? escapeHtml(best.name) + " · " + escapeHtml(visibleGrade(best)) : "No roster yet."}</p></div><div class="logItem"><b>Weakest group</b><p class="muted">${escapeHtml(weak.pos)} depth · ${weak.count}</p></div><div class="logItem"><b>Recommended next move</b><p class="muted">${escapeHtml(recommendation())}</p></div></div></div></div></section><section class="card"><div class="sectionTitle"><h3>Front Office Feed</h3><span>${S.log.length} events</span></div><div class="cardPad log">${
+  return `${kpis()}${nextGameBrief()}<div class="layout2" style="margin-top:18px"><section class="card"><div class="sectionTitle"><h3>Owner Briefing</h3><span>Visible franchise pulse and next actions</span></div><div class="cardPad"><div class="layout3"><div><h3>${escapeHtml(S.team.city)} ${escapeHtml(S.team.nickname)}</h3><p class="muted">${escapeHtml(S.team.arena)}. You are building a one-season expansion roster under a simplified cap while protecting future optionality.</p><button class="btn" data-tab="${expansionDraftOpen() ? "draft" : "roster"}">${expansionDraftOpen() ? "Open Draft Room" : "Open Roster"}</button></div><div class="impact">${impactBars()}</div><div class="log"><div class="logItem"><b>Next opponent</b><p class="muted">${escapeHtml(nextOpponentSummary())}</p></div><div class="logItem"><b>Best player</b><p class="muted">${best ? escapeHtml(best.name) + " · " + escapeHtml(visibleGrade(best)) : "No roster yet."}</p></div><div class="logItem"><b>Weakest group</b><p class="muted">${escapeHtml(weak.pos)} depth · ${weak.count}</p></div><div class="logItem"><b>Recommended next move</b><p class="muted">${escapeHtml(recommendation())}</p></div></div></div></div></section><section class="card"><div class="sectionTitle"><h3>Front Office Feed</h3><span>${S.log.length} events</span></div><div class="cardPad log">${
     S.log
       .slice(0, 8)
       .map(
@@ -850,7 +1020,7 @@ function frontOfficeScore() {
   score += S.roster.length * 3;
   if (userSalary() <= DATA.cap) score += 15;
   score += S.objectives.filter((o) => o.done).length * 6;
-  score += Math.max(0, S.picks.you - 2) * 3;
+  score += Math.max(0, ownedPicks(S.team.abbr).length - 2) * 3;
   score += Math.round(avg(S.roster.map((p) => p.ratings.potential)) / 10) || 0;
   return Math.min(99, score);
 }
@@ -869,8 +1039,8 @@ function frontOfficeDrivers() {
   drivers.push(userSalary() <= DATA.cap ? "Cap compliant" : "Over cap");
   const completed = S.objectives.filter((o) => o.done).length;
   drivers.push(`${completed} objective${completed === 1 ? "" : "s"} done`);
-  if (S.picks.you > 2)
-    drivers.push(`${S.picks.you - 2} extra draft pick${S.picks.you - 2 === 1 ? "" : "s"}`);
+  const extraPicks = ownedPicks(S.team.abbr).length - 2;
+  if (extraPicks > 0) drivers.push(`${extraPicks} extra draft pick${extraPicks === 1 ? "" : "s"}`);
   drivers.push(`Upside ${Math.round(avg(S.roster.map((p) => p.ratings.potential)) || 0)}`);
   return drivers.join(" · ");
 }
@@ -920,6 +1090,8 @@ const STRENGTH_TAGS = [
   "transition",
 ];
 function draft() {
+  if (!expansionDraftOpen())
+    return `<section class="card"><div class="sectionTitle"><h3>Expansion Draft Closed</h3><span>opening night has passed</span></div><div class="cardPad"><p class="muted">The expansion draft is closed. Year ${S.year + 1} rookies are selected during the offseason draft on the Season tab.</p><div class="actions"><button class="btn" data-tab="schedule">Open Season</button><button class="btn secondary" data-tab="roster">Roster</button></div></div></section>`;
   const pool = filteredDraftPool();
   const archOpts =
     `<option value="ALL">All archetypes</option>` +
@@ -1026,7 +1198,37 @@ function trades() {
       F: "forwards",
       C: "centers",
     }[teamNeed(other)] || "players";
-  return `${kpis()}<section class="card"><div class="sectionTitle"><h3>Trade Machine</h3><span>salary, value, team need, protected-player logic</span></div><div class="cardPad"><div class="layout2"><div class="field"><label>Trade partner</label><select data-trade-team>${S.teams.map((t) => `<option value="${t.id}" ${trade.team === t.id ? "selected" : ""}>${t.name} · ${t.status}</option>`).join("")}</select><div class="mini">Partner need: ${partnerNeedLabel}. Protected players are expensive; prioritize fit and future value.</div></div><div class="field"><label>Filter players (name, strength, archetype, position)</label><input data-trade-query placeholder="e.g. shooting" value="${escapeAttr(trade.query || "")}"></div></div><div class="tradeBox"><div class="tradePanel"><div class="sectionTitle"><h3>${escapeHtml(S.team.nickname)} sends</h3><span>${shortMoney(sumSelected(S.roster, trade.userGive))}</span></div><div class="tradeList">${userList.map((p) => checkRow(p, "userGive")).join("") || '<div class="empty">No roster players match.</div>'}</div><div class="cardPad"><label><input type="checkbox" data-pick="user" ${trade.userPick ? "checked" : ""} ${S.picks.you > 0 ? "" : "disabled"}> Include your future 1st-round pick (${S.picks.you} available)</label></div></div><div class="tradePanel"><div class="sectionTitle"><h3>${escapeHtml(other.name)} sends</h3><span>${shortMoney(sumSelected(other.players, trade.otherGive))}</span></div><div class="tradeList">${otherList.map((p) => checkRow(p, "otherGive")).join("") || '<div class="empty">No partner players match.</div>'}</div><div class="cardPad"><label><input type="checkbox" data-pick="other" ${trade.otherPick ? "checked" : ""} ${S.picks.league > 0 ? "" : "disabled"}> Request their future 2nd-round pick (${S.picks.league} available)</label></div></div></div><div class="tradeSummary"><div class="logItem"><b>Trade Verdict: <span class="pill ${evaln.ok ? (evaln.label === "Strong Offer" ? "good" : evaln.label === "Good Offer" ? "info" : evaln.label === "Close Offer" ? "warn" : "good") : "warn"}">${evaln.label}</span></b><p class="muted">${evaln.reason}</p><div class="meter"><span>Your outgoing value</span><div class="bar"><i style="width:${Math.min(100, evaln.userValue / 20)}%"></i></div><b>${evaln.userValue}</b></div><div class="meter"><span>Partner outgoing value</span><div class="bar"><i style="width:${Math.min(100, evaln.otherValue / 20)}%"></i></div><b>${evaln.otherValue}</b></div></div>${evaln.advice && evaln.advice.length ? `<div class="tradeAdvice"><h4>Why this verdict?</h4><ul>${evaln.advice.map((item) => `<li>${item}</li>`).join("")}</ul></div>` : ""}</div><div class="actions"><button class="btn" data-action="submitTrade" ${evaln.ok ? "" : "disabled"}>Submit Trade</button><button class="btn secondary" data-action="clearTrade">Clear Selections</button></div></div></section>`;
+  return `${kpis()}${tradeDeskHeader(other)}${npcOfferList()}<section class="card"><div class="sectionTitle"><h3>Trade Machine</h3><span>salary, value, team need, protected-player logic</span></div><div class="cardPad"><div class="layout2"><div class="field"><label>Trade partner</label><select data-trade-team>${S.teams.map((t) => `<option value="${t.id}" ${trade.team === t.id ? "selected" : ""}>${t.name} · ${t.status}</option>`).join("")}</select><div class="mini">Partner need: ${partnerNeedLabel}. Protected players are expensive; prioritize fit and future value.</div></div><div class="field"><label>Filter players (name, strength, archetype, position)</label><input data-trade-query placeholder="e.g. shooting" value="${escapeAttr(trade.query || "")}"></div></div><div class="tradeBox"><div class="tradePanel"><div class="sectionTitle"><h3>${escapeHtml(S.team.nickname)} sends</h3><span>${shortMoney(sumSelected(S.roster, trade.userGive))}</span></div><div class="tradeList">${userList.map((p) => checkRow(p, "userGive")).join("") || '<div class="empty">No roster players match.</div>'}</div><div class="cardPad">${pickAssetList(ownedPicks(S.team.abbr), "userPicks")}</div></div><div class="tradePanel"><div class="sectionTitle"><h3>${escapeHtml(other.name)} sends</h3><span>${shortMoney(sumSelected(other.players, trade.otherGive))}</span></div><div class="tradeList">${otherList.map((p) => checkRow(p, "otherGive")).join("") || '<div class="empty">No partner players match.</div>'}</div><div class="cardPad">${pickAssetList(ownedPicks(other.id), "otherPicks")}</div></div></div><div class="tradeSummary"><div class="logItem"><b>Trade Verdict: <span class="pill ${evaln.ok ? (evaln.label === "Strong Offer" ? "good" : evaln.label === "Good Offer" ? "info" : evaln.label === "Close Offer" ? "warn" : "good") : "warn"}">${evaln.label}</span></b><p class="muted">${evaln.reason}</p><div class="meter"><span>Your outgoing value</span><div class="bar"><i style="width:${Math.min(100, evaln.userValue / 20)}%"></i></div><b>${evaln.userValue}</b></div><div class="meter"><span>Partner outgoing value</span><div class="bar"><i style="width:${Math.min(100, evaln.otherValue / 20)}%"></i></div><b>${evaln.otherValue}</b></div></div>${evaln.advice && evaln.advice.length ? `<div class="tradeAdvice"><h4>Why this verdict?</h4><ul>${evaln.advice.map((item) => `<li>${item}</li>`).join("")}</ul></div>` : ""}</div><div class="actions"><button class="btn" data-action="submitTrade" ${evaln.ok ? "" : "disabled"}>Review Trade</button><button class="btn secondary" data-action="clearTrade">Clear Selections</button></div></div></section>`;
+}
+function tradeDeskHeader() {
+  const deadline = BALANCE.tradeDeadlineWeek || 12;
+  if (tradesLocked())
+    return `<div class="callout"><b>Trade deadline passed (Week ${deadline}).</b><p class="muted">The desk is closed until the offseason. Incoming NPC offers are frozen.</p></div>`;
+  if (S.phase === "Expansion Build")
+    return `<div class="callout"><b>Preseason desk</b><p class="muted">Picks are real draft slots. The deadline is Week ${deadline}; NPC clubs will start calling once the season is underway.</p></div>`;
+  return `<div class="callout"><b>Deadline: Week ${deadline}</b><p class="muted">Currently Week ${S.week}. Year-stamped picks change who is on the clock in that draft.</p></div>`;
+}
+function npcOfferList() {
+  const offers = S.pendingOffers || [];
+  if (!offers.length) return "";
+  return `<section class="card" style="margin-bottom:18px"><div class="sectionTitle"><h3>Incoming Offers</h3><span>${offers.length}</span></div><div class="cardPad log">${offers
+    .map((offer) => {
+      const from = teamMeta(offer.from);
+      const their = (offer.theirPlayers || [])
+        .map((id) => findPlayer(id))
+        .filter(Boolean)
+        .map((p) => p.name)
+        .join(", ");
+      const want = (offer.wantPlayers || [])
+        .map((id) => findPlayer(id))
+        .filter(Boolean)
+        .map((p) => p.name)
+        .join(", ");
+      const theirPicks = (offer.theirPicks || []).map((id) => pickLabel(findPick(id))).join(", ");
+      const wantPicks = (offer.wantPicks || []).map((id) => pickLabel(findPick(id))).join(", ");
+      return `<div class="logItem"><b>${escapeHtml(from.name)} offer</b><p class="muted">They send ${escapeHtml(their || theirPicks || "assets")}. They want ${escapeHtml(want || wantPicks || "assets")}.</p><div class="actions"><button class="btn" data-accept-offer="${escapeAttr(offer.id)}" ${tradesLocked() ? "disabled" : ""}>Accept</button><button class="btn secondary" data-decline-offer="${escapeAttr(offer.id)}">Decline</button></div></div>`;
+    })
+    .join("")}</div></section>`;
 }
 function checkRow(p, side) {
   const checked = trade[side].includes(p.id);
@@ -1038,19 +1240,41 @@ function sumSelected(players, ids) {
 function selectedValue(players, ids) {
   return players.filter((p) => ids.includes(p.id)).reduce((a, p) => a + tradeValue(p), 0);
 }
+function pickAssetList(picks, side) {
+  if (!picks.length) return '<div class="mini">No future picks to move.</div>';
+  return picks
+    .slice()
+    .sort((a, b) => a.year - b.year || a.round - b.round)
+    .map((pick) => {
+      const checked = (trade[side] || []).includes(pick.id);
+      return `<label class="checkRow"><input type="checkbox" data-trade-pick="${side}" value="${escapeAttr(pick.id)}" ${checked ? "checked" : ""}><div><b>${escapeHtml(pickLabel(pick))}</b><div class="mini">${pick.round === 1 ? "First-round slot" : "Second-round slot"} · ${pick.year} draft</div></div></label>`;
+    })
+    .join("");
+}
 function evaluateTrade(other) {
   const uPlayers = S.roster.filter((p) => trade.userGive.includes(p.id));
   const oPlayers = other.players.filter((p) => trade.otherGive.includes(p.id));
-  let userValue = selectedValue(S.roster, trade.userGive) + (trade.userPick ? 420 : 0);
-  let otherValue = selectedValue(other.players, trade.otherGive) + (trade.otherPick ? 160 : 0);
+  const userPickAssets = selectedPicks("user");
+  const otherPickAssets = selectedPicks("other");
+  let userValue =
+    selectedValue(S.roster, trade.userGive) +
+    userPickAssets.reduce((sum, pick) => sum + pickTradeValue(pick), 0);
+  let otherValue =
+    selectedValue(other.players, trade.otherGive) +
+    otherPickAssets.reduce((sum, pick) => sum + pickTradeValue(pick), 0);
   const salaryIn = sumSelected(other.players, trade.otherGive),
     salaryOut = sumSelected(S.roster, trade.userGive);
   const futureSalary = userSalary() - salaryOut + salaryIn;
   let reasons = [];
   let advice = [];
   let ok = true;
-  const hasUserAssets = uPlayers.length || trade.userPick;
-  const hasOtherAssets = oPlayers.length || trade.otherPick;
+  const hasUserAssets = uPlayers.length || userPickAssets.length;
+  const hasOtherAssets = oPlayers.length || otherPickAssets.length;
+  if (tradesLocked()) {
+    ok = false;
+    reasons.push("The trade deadline has passed.");
+    advice.push("Wait for the offseason to move players again.");
+  }
   if (!hasUserAssets || !hasOtherAssets) {
     ok = false;
     if (!hasUserAssets) {
@@ -1062,12 +1286,22 @@ function evaluateTrade(other) {
       advice.push("Ask for a player or pick from your trade partner.");
     }
   }
-  if (trade.userPick && S.picks.you < 1) {
+  if ((trade.userPicks || []).some((id) => !findPick(id) || findPick(id).owner !== S.team.abbr)) {
     ok = false;
     reasons.push("You do not have a future pick available to trade.");
     advice.push("Remove the pick from your side of the offer.");
   }
-  if (trade.otherPick && S.picks.league < 1) {
+  if ((trade.otherPicks || []).some((id) => !findPick(id) || findPick(id).owner !== other.id)) {
+    ok = false;
+    reasons.push("The partner has no available pick to send.");
+    advice.push("Remove the requested pick from the package.");
+  }
+  if (trade.userPick && !userPickAssets.length) {
+    ok = false;
+    reasons.push("You do not have a future pick available to trade.");
+    advice.push("Remove the pick from your side of the offer.");
+  }
+  if (trade.otherPick && !otherPickAssets.length) {
     ok = false;
     reasons.push("The partner has no available pick to send.");
     advice.push("Remove the requested pick from the package.");
@@ -1316,6 +1550,55 @@ function statsLeadersSection() {
 function resetFaBase() {
   _faBase = null;
 }
+function refreshWaiverClass(year) {
+  const targetYear = year || S.year;
+  _faBase = generateYearlyWaivers(targetYear);
+  S.faClassYear = targetYear;
+}
+function generateYearlyWaivers(year) {
+  const archetypes = ["veteran", "depth", "big", "wing", "engine"];
+  const positions = ["F", "G", "C", "G/F", "G"];
+  const names = [];
+  const used = new Set();
+  while (names.length < 5) {
+    const name = `${pickOne(PROC_FIRST)} ${pickOne(PROC_LAST)}`;
+    if (used.has(name)) continue;
+    used.add(name);
+    names.push(name);
+  }
+  return names.map((name, index) => {
+    const pos = positions[index];
+    const base = rand(52, 64);
+    const ratings = {
+      scoring: clampRating(base + rand(-6, 8)),
+      shooting: clampRating(base + rand(-8, 6)),
+      playmaking: clampRating(base + rand(-8, 6)),
+      defense: clampRating(base + rand(-6, 8)),
+      rebounding: clampRating(base + rand(-8, 10)),
+      athleticism: clampRating(base + rand(-10, 6)),
+      iq: clampRating(base + rand(0, 10)),
+      potential: clampRating(base + rand(-4, 4)),
+    };
+    return {
+      id: `fa-${year}-${slug(name)}`,
+      name,
+      pos,
+      team: "FA",
+      salary: 260000 + rand(0, 90000),
+      years: 1,
+      scouting: "Yearly waiver addition — cheap veteran minutes and practice-body depth.",
+      strengths: ratingsTop(ratings),
+      weaknesses: ratingsBottom(ratings),
+      protected: false,
+      ratings,
+      archetype: archetypes[index],
+      mood: 55 + rand(0, 20),
+      age: 28 + rand(0, 6),
+      injury: null,
+      lastTeam: "FA",
+    };
+  });
+}
 function ensureSeason(force = false) {
   if (!S.started) return;
   if (!S.season || !Array.isArray(S.season.schedule) || force) {
@@ -1404,18 +1687,69 @@ function generateSchedule() {
 }
 // Shared helper: the available (non-injured) rotation, best-first, capped at n.
 // Used by teamPower, distributeAndRecord, rollInjuries and the Game Day view.
-function healthyRotation(players, n) {
-  const sorted = players
-    .slice()
-    .filter((p) => !p.injury)
-    .sort((a, b) => composite(b) - composite(a));
+function healthyRotation(players, n, ownerId) {
+  const healthy = players.slice().filter((p) => !p.injury);
+  const useUserOrder = ownerId === S.team.abbr || players === S.roster;
+  if (useUserOrder && Array.isArray(S.rotation) && S.rotation.length) {
+    const ordered = [];
+    const seen = new Set();
+    S.rotation.forEach((id) => {
+      const player = healthy.find((item) => item.id === id);
+      if (player && !seen.has(player.id)) {
+        ordered.push(player);
+        seen.add(player.id);
+      }
+    });
+    healthy
+      .slice()
+      .sort((a, b) => composite(b) - composite(a))
+      .forEach((player) => {
+        if (!seen.has(player.id)) ordered.push(player);
+      });
+    return n === null || n === undefined ? ordered : ordered.slice(0, n);
+  }
+  const sorted = healthy.sort((a, b) => composite(b) - composite(a));
   return n === null || n === undefined ? sorted : sorted.slice(0, n);
+}
+function ensureUserRotation() {
+  if (!Array.isArray(S.rotation)) S.rotation = [];
+  S.rotation = S.rotation.filter((id) => S.roster.some((p) => p.id === id));
+  if (S.rotation.length) return S.rotation;
+  S.rotation = S.roster
+    .slice()
+    .sort((a, b) => composite(b) - composite(a))
+    .slice(0, 8)
+    .map((p) => p.id);
+  return S.rotation;
+}
+function moveRotation(id, delta) {
+  ensureUserRotation();
+  const idx = S.rotation.indexOf(id);
+  if (idx < 0) return;
+  const next = idx + delta;
+  if (next < 0 || next >= S.rotation.length) return;
+  const copy = S.rotation.slice();
+  const [item] = copy.splice(idx, 1);
+  copy.splice(next, 0, item);
+  S.rotation = copy;
+  renderView();
+}
+function sitPlayer(id) {
+  ensureUserRotation();
+  S.rotation = S.rotation.filter((item) => item !== id);
+  renderView();
+}
+function startPlayer(id) {
+  ensureUserRotation();
+  if (!S.roster.some((p) => p.id === id)) return;
+  if (!S.rotation.includes(id)) S.rotation.push(id);
+  renderView();
 }
 function teamPower(id) {
   if (_powerCacheOn && _powerCache[id]) return _powerCache[id];
   const meta = teamMeta(id);
   // Injured players are unavailable and don't contribute to the lineup.
-  const players = healthyRotation(meta.players);
+  const players = healthyRotation(meta.players, null, id);
   if (!players.length) {
     const empty = {
       overall: 55,
@@ -1520,6 +1854,11 @@ function hcTraitMods(teamId) {
   }
   return out;
 }
+function rotationMood(teamId) {
+  const players = healthyRotation(teamMeta(teamId).players, 8, teamId);
+  if (!players.length) return 60;
+  return avg(players.map((p) => p.mood || 60));
+}
 function simScore(home, away, game) {
   const hp = teamPower(home),
     ap = teamPower(away);
@@ -1540,7 +1879,7 @@ function simScore(home, away, game) {
       S.coaching.weeklyFocus &&
       S.coaching.weeklyFocus !== "none" &&
       game &&
-      S.coaching.focusWeek === game.week;
+      (S.coaching.focusWeek === game.week || S.coaching.bulkFocus);
     const f = focusApplies ? S.coaching.weeklyFocus : null;
     const asstTraits = (S.coaches && S.coaches.assistant && S.coaches.assistant.traits) || [];
     const filmBuff = asstTraits.includes("film-buff") ? 1 : 0;
@@ -1610,8 +1949,11 @@ function simScore(home, away, game) {
   let tight = 0;
   if (userIs && hcTraits.includes("clutch")) tight += 3;
   if (userIs && game && game.playoff && hcTraits.includes("championship-pedigree")) tight += 2;
-  let hs = Math.max(58, Math.round(hBase + rand(-7 - hThin + tight, 8 + hThin - tight)));
-  let as = Math.max(55, Math.round(aBase + rand(-7 - aThin + tight, 8 + aThin - tight)));
+  const moodScale = BALANCE.moodScoreScale || 0.04;
+  const hMood = (rotationMood(home) - 60) * moodScale;
+  const aMood = (rotationMood(away) - 60) * moodScale;
+  let hs = Math.max(58, Math.round(hBase + hMood + rand(-7 - hThin + tight, 8 + hThin - tight)));
+  let as = Math.max(55, Math.round(aBase + aMood + rand(-7 - aThin + tight, 8 + aThin - tight)));
   // Break ties without a systematic home bias: pick the winner randomly.
   if (hs === as) {
     if (random() < 0.5) hs += rand(1, 5);
@@ -1660,7 +2002,7 @@ window.simTest = function (seasons = 20) {
 // Returns top-3 box-score lines for backward-compat display.
 function distributeAndRecord(id, ptsFor, won, accumulate = true) {
   const team = teamMeta(id);
-  const healthy = healthyRotation(team.players, 8);
+  const healthy = healthyRotation(team.players, 8, id);
   if (!healthy.length) return [];
   const total = Math.max(0, Math.round(ptsFor));
   // Weight each player's scoring share by rotation slot and scoring rating (plus
@@ -1901,14 +2243,29 @@ function simWeek() {
   S.week = Math.max(S.week, week + 1);
   render();
 }
+function applyBulkCoaching() {
+  if (!S.season || !S.coaching) return;
+  const remaining = S.season.schedule.filter(
+    (g) => !g.played && (g.home === S.team.abbr || g.away === S.team.abbr),
+  );
+  const next = remaining[0];
+  const template = next && S.coaching.gamePlans && S.coaching.gamePlans[next.id];
+  remaining.forEach((g) => {
+    if (template)
+      S.coaching.gamePlans[g.id] = { scouted: !!template.scouted, plan: template.plan || null };
+  });
+  if (S.coaching.weeklyFocus && S.coaching.weeklyFocus !== "none") S.coaching.bulkFocus = true;
+}
 function simSeason() {
   if (!requireOpeningNightReady()) return;
   S.phase = `${S.year} Regular Season`;
   ensureSeason();
+  applyBulkCoaching();
   S.season.schedule.filter((x) => !x.played).forEach(simulateGame);
   // Derive the week from the schedule rather than hardcoding 17, so the topbar
   // stays correct regardless of schedule length.
   S.week = Math.max(...S.season.schedule.map((x) => x.week), S.week) + 1;
+  if (S.coaching) S.coaching.bulkFocus = false;
   render();
 }
 function nextGameBrief() {
@@ -2016,7 +2373,11 @@ function gameDayView() {
     scouted: false,
     plan: null,
   };
-  const topRotation = healthyRotation(S.roster, 8);
+  ensureUserRotation();
+  const topRotation = healthyRotation(S.roster, 8, S.team.abbr);
+  const bench = S.roster.filter(
+    (p) => !p.injury && !topRotation.some((starter) => starter.id === p.id),
+  );
   const injuredRotation = S.roster.filter((p) => p.injury);
   const injuredCount = S.roster.filter((p) => p.injury).length;
   const recommendedPlan = recommendPlan(oppPower);
@@ -2030,13 +2391,18 @@ function gameDayView() {
     ? `<div class="impact" style="margin-top:10px"><div class="impactRow"><span>Per O</span><div class="bar"><i style="width:${oppPower.perO}%"></i></div><b>${oppPower.perO}</b></div><div class="impactRow"><span>Per D</span><div class="bar"><i style="width:${oppPower.perD}%"></i></div><b>${oppPower.perD}</b></div><div class="impactRow"><span>Int O</span><div class="bar"><i style="width:${oppPower.intO}%"></i></div><b>${oppPower.intO}</b></div><div class="impactRow"><span>Int D</span><div class="bar"><i style="width:${oppPower.intD}%"></i></div><b>${oppPower.intD}</b></div></div><p class="muted" style="margin-top:8px">${recLine}</p>`
     : `<div style="margin-top:10px"><button class="btn" data-scout="${g.id}">Scout Opponent</button><p class="muted" style="margin-top:8px">Skipping the scout means flying blind. You can still set a plan, but you won't know which lane to defend.</p></div>`;
   const planBlock = `<div class="actions" style="margin-top:10px"><button class="btn ${gp.plan === "pack" ? "" : "secondary"}" data-plan="${g.id}|pack">Pack the Paint</button><button class="btn ${gp.plan === "extend" ? "" : "secondary"}" data-plan="${g.id}|extend">Extend Defense</button>${gp.plan ? `<button class="btn ghost" data-plan="${g.id}|none">Clear</button>` : ""}</div>`;
-  const rotationTable = `<table class="table"><thead><tr><th>Player</th><th>Pos</th><th>Status</th><th>Mood</th></tr></thead><tbody>${topRotation.map((p) => `<tr><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div class="playerName">${escapeHtml(p.name)}</div></div></td><td>${escapeHtml(p.pos)}</td><td>${injuryBadge(p)}</td><td>${p.mood || 60}</td></tr>`).join("")}${injuredRotation
-    .map(
-      (p) =>
-        `<tr style="opacity:.5"><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div class="playerName">${escapeHtml(p.name)}</div></div></td><td>${escapeHtml(p.pos)}</td><td>${injuryBadge(p)}</td><td>${p.mood || 60}</td></tr>`,
-    )
+  const rotationRow = (p, role, idx) =>
+    `<tr ${role === "injured" ? 'style="opacity:.5"' : ""}><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div class="playerName">${escapeHtml(p.name)}</div></div></td><td>${escapeHtml(p.pos)}</td><td>${injuryBadge(p)}</td><td>${p.mood || 60}</td><td>${p.age || "—"}</td><td class="actions">${
+      role === "injured"
+        ? ""
+        : role === "start"
+          ? `<button class="btn ghost" data-rotate-up="${escapeAttr(p.id)}" ${idx === 0 ? "disabled" : ""}>Up</button><button class="btn ghost" data-rotate-down="${escapeAttr(p.id)}" ${idx === topRotation.length - 1 ? "disabled" : ""}>Down</button><button class="btn secondary" data-sit="${escapeAttr(p.id)}">Sit</button>`
+          : `<button class="btn secondary" data-start="${escapeAttr(p.id)}">Start</button>`
+    }</td></tr>`;
+  const rotationTable = `<table class="table"><thead><tr><th>Player</th><th>Pos</th><th>Status</th><th>Mood</th><th>Age</th><th></th></tr></thead><tbody>${topRotation.map((p, idx) => rotationRow(p, "start", idx)).join("")}${bench.map((p) => rotationRow(p, "bench")).join("")}${injuredRotation
+    .map((p) => rotationRow(p, "injured"))
     .join("")}</tbody></table>`;
-  return `<section class="card"><div class="sectionTitle"><h3>Game Day · Week ${g.week} · ${isHome ? "vs" : "at"} ${opp.name}</h3><span>${opp.id} ${oppRec.w}-${oppRec.l}</span></div><div class="cardPad"><div class="layout2"><section><h3 style="margin-top:0">Opponent</h3><p class="muted">${opp.name} · ${oppRec.w}-${oppRec.l} · power index ${oppPower.overall}</p>${scoutBlock}<h3 style="margin-top:18px">Your Game Plan</h3>${planBlock}</section><section><h3 style="margin-top:0">Your Prep</h3><p class="muted">Weekly Focus: <b>${currentFocusLabel()}</b></p><p class="muted">Plan: <b>${gp.plan === "pack" ? "Pack the Paint" : gp.plan === "extend" ? "Extend Defense" : "Not set"}</b></p><p class="muted">Power Index: <b>${myPower.overall}</b> · Per ${myPower.perO}/${myPower.perD} · Int ${myPower.intO}/${myPower.intD}</p><p class="muted">Injured players: <b>${injuredCount}</b></p></section></div><h3 style="margin-top:18px">Top-8 Rotation</h3>${rotationTable}<div class="actions" style="margin-top:18px"><button class="btn" data-action="playQueuedGame" style="font-size:15px;padding:14px 20px">Play Game →</button><button class="btn secondary" data-action="closeGameDay">Hold Off</button></div></div></section>`;
+  return `<section class="card"><div class="sectionTitle"><h3>Game Day · Week ${g.week} · ${isHome ? "vs" : "at"} ${opp.name}</h3><span>${opp.id} ${oppRec.w}-${oppRec.l}</span></div><div class="cardPad"><div class="layout2"><section><h3 style="margin-top:0">Opponent</h3><p class="muted">${opp.name} · ${oppRec.w}-${oppRec.l} · power index ${oppPower.overall}</p>${scoutBlock}<h3 style="margin-top:18px">Your Game Plan</h3>${planBlock}</section><section><h3 style="margin-top:0">Your Prep</h3><p class="muted">Weekly Focus: <b>${currentFocusLabel()}</b></p><p class="muted">Plan: <b>${gp.plan === "pack" ? "Pack the Paint" : gp.plan === "extend" ? "Extend Defense" : "Not set"}</b></p><p class="muted">Power Index: <b>${myPower.overall}</b> · Per ${myPower.perO}/${myPower.perD} · Int ${myPower.intO}/${myPower.intD}</p><p class="muted">Injured players: <b>${injuredCount}</b></p></section></div><h3 style="margin-top:18px">Your Rotation</h3><p class="muted">Sit/start and reorder the eight who play. Injured players cannot be activated.</p>${rotationTable}<div class="actions" style="margin-top:18px"><button class="btn" data-action="playQueuedGame" style="font-size:15px;padding:14px 20px">Play Game →</button><button class="btn secondary" data-action="closeGameDay">Hold Off</button></div></div></section>`;
 }
 function findAnyGame(gameId) {
   const reg = S.season && S.season.schedule.find((x) => x.id === gameId);
@@ -2134,7 +2500,46 @@ function recentResults() {
 }
 
 function setupPage() {
-  return `<div class="setup"><section class="hero"><div><h1>Build the next WNBA front office.</h1><p>Choose a market, name the expansion team, set the colors, then enter a live-feeling draft room with cap pressure, protected stars, hidden ratings, trades, waivers, and a real roster-building dashboard.</p></div><div><div class="previewJersey">${abbr(S.team.city, S.team.nickname)}</div><p class="mini">White/orange dashboard theme. Your selected colors drive team accents throughout the UI.</p></div></section><section class="card form"><h2>Expansion Setup</h2><div class="field"><label for="citySelect">Preset city</label><select id="citySelect">${DATA.expansionCities.map((c, i) => `<option value="${i}" ${S.team.city === c.city ? "selected" : ""}>${c.city} · suggested ${c.nickname}</option>`).join("")}</select></div><div class="tiles" role="radiogroup" aria-label="Expansion city presets">${DATA.expansionCities.map((c, i) => `<button type="button" class="cityTile ${S.team.city === c.city ? "selected" : ""}" data-citytile="${i}" role="radio" aria-checked="${S.team.city === c.city}"><strong>${c.city}</strong><small>Market ${c.market} · pressure ${c.pressure} · ${c.arena}</small></button>`).join("")}</div><br><div class="field"><label for="nickInput">Team nickname</label><input id="nickInput" value="${escapeAttr(S.team.nickname)}" placeholder="Foundry"></div><div class="field"><label for="arenaInput">Arena</label><input id="arenaInput" value="${escapeAttr(S.team.arena)}"></div><div class="colorRow"><div class="field" style="flex:1"><label for="primaryInput">Primary</label><input id="primaryInput" type="color" value="${escapeAttr(S.team.primary)}"></div><div class="field" style="flex:1"><label for="secondaryInput">Secondary</label><input id="secondaryInput" type="color" value="${escapeAttr(S.team.secondary)}"></div></div><div class="actions"><button class="btn" data-action="start">Enter Front Office</button><button class="btn secondary" data-action="randomize">Randomize Identity</button></div><p class="muted">Prototype includes 15 existing/franchise teams, expansion draft pool, trade engine, waivers, dashboard KPIs, scouting cards, hidden player ratings and local autosave.</p></section></div>`;
+  return `<div class="setup"><section class="hero"><div><h1>Build the next WNBA front office.</h1><p>Choose a market, name the expansion team, set the colors, then enter a live-feeling draft room with cap pressure, protected stars, hidden ratings, trades, waivers, and a real roster-building dashboard.</p></div><div><div class="previewJersey">${abbr(S.team.city, S.team.nickname)}</div><p class="mini">White/orange dashboard theme. Your selected colors drive team accents throughout the UI.</p></div></section>${setupSavePanel()}<section class="card form"><h2>Expansion Setup</h2><div class="field"><label for="citySelect">Preset city</label><select id="citySelect">${DATA.expansionCities.map((c, i) => `<option value="${i}" ${S.team.city === c.city ? "selected" : ""}>${c.city} · suggested ${c.nickname}</option>`).join("")}</select></div><div class="tiles" role="radiogroup" aria-label="Expansion city presets">${DATA.expansionCities.map((c, i) => `<button type="button" class="cityTile ${S.team.city === c.city ? "selected" : ""}" data-citytile="${i}" role="radio" aria-checked="${S.team.city === c.city}"><strong>${c.city}</strong><small>Market ${c.market} · pressure ${c.pressure} · ${c.arena}</small></button>`).join("")}</div><br><div class="field"><label for="nickInput">Team nickname</label><input id="nickInput" value="${escapeAttr(S.team.nickname)}" placeholder="Foundry"></div><div class="field"><label for="arenaInput">Arena</label><input id="arenaInput" value="${escapeAttr(S.team.arena)}"></div><div class="colorRow"><div class="field" style="flex:1"><label for="primaryInput">Primary</label><input id="primaryInput" type="color" value="${escapeAttr(S.team.primary)}"></div><div class="field" style="flex:1"><label for="secondaryInput">Secondary</label><input id="secondaryInput" type="color" value="${escapeAttr(S.team.secondary)}"></div></div><div class="actions"><button class="btn" data-action="start">Enter Front Office</button><button class="btn secondary" data-action="randomize">Randomize Identity</button></div><p class="muted">Prototype includes 15 existing/franchise teams, expansion draft pool, trade engine, waivers, dashboard KPIs, scouting cards, hidden player ratings and local autosave.</p></section></div>`;
+}
+function setupSavePanel() {
+  const slots = readSaveIndex();
+  const slotList = slots.length
+    ? slots
+        .map(
+          (slot) =>
+            `<div class="checkRow"><div><b>${escapeHtml(slot.name)}</b>${slot.id === activeSlotId ? ' <span class="pill good">Active</span>' : ""}<div class="mini">Year ${slot.year} · ${slot.updatedAt ? new Date(slot.updatedAt).toLocaleString() : "unknown"}</div></div>${slot.id === activeSlotId ? "" : `<button class="btn secondary" data-load-slot="${escapeAttr(slot.id)}">Load</button>`}</div>`,
+        )
+        .join("")
+    : '<div class="empty">No saved franchises in this browser yet.</div>';
+  const importPreview = pendingImport
+    ? `<div class="logItem importPreview"><b>Ready to import: ${escapeHtml(pendingImport.saveName)}</b><p class="muted">${escapeHtml(pendingImport.team.city)} ${escapeHtml(pendingImport.team.nickname)} · Year ${pendingImport.year}</p><div class="actions"><button class="btn" data-action="confirmImport">Apply Import</button><button class="btn secondary" data-action="cancelImport">Cancel</button></div></div>`
+    : "";
+  return `<section class="card form"><h2>Continue a franchise</h2><p class="muted">Load a slot from this browser, or import an exported JSON. Progress stays on this device unless you export.</p><div class="log">${slotList}</div><div class="field"><label for="saveImport">Import save JSON</label><textarea id="saveImport" rows="3" placeholder="Paste exported save JSON"></textarea></div><div class="actions"><button class="btn secondary" data-action="importSave">Validate Import</button></div>${importPreview}</section>`;
+}
+function seasonStepper() {
+  const stages = [
+    { id: "regular", label: "Regular" },
+    { id: "playoffs", label: "Playoffs" },
+    { id: "awards", label: "Awards" },
+    { id: "aging", label: "Aging" },
+    { id: "draft", label: "Draft" },
+    { id: "next", label: "Next Year" },
+  ];
+  let current = "regular";
+  if (S.offseason && S.offseason.stage === "done") current = "next";
+  else if (S.offseason && S.offseason.stage === "draft") current = "draft";
+  else if (S.offseason && (S.offseason.stage === "aging" || S.offseason.stage === "contracts"))
+    current = "aging";
+  else if (S.pendingAwards) current = "awards";
+  else if (S.playoffs) current = "playoffs";
+  const currentIdx = stages.findIndex((stage) => stage.id === current);
+  return `<nav class="seasonStepper" aria-label="Season progress"><ol>${stages
+    .map((stage, index) => {
+      const state = index < currentIdx ? "done" : index === currentIdx ? "current" : "todo";
+      return `<li class="${state}"><span>${escapeHtml(stage.label)}</span></li>`;
+    })
+    .join("")}</ol></nav>`;
 }
 function abbr(city, nick) {
   return ((city || "").slice(0, 1) + (nick || "").slice(0, 2)).toUpperCase();
@@ -2169,6 +2574,25 @@ function modalHtml() {
     const t = S.teams.find((x) => x.id === modal.id);
     if (!t) return "";
     return `<div class="modalShade" data-modal-shade><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modalHeader"><h3 id="modal-title">${escapeHtml(t.name)}</h3><button class="close" data-close aria-label="Close team roster">Close</button></div><div class="modalBody">${rosterTable(t.players)}</div></div></div>`;
+  }
+  if (modal.type === "trade-confirm") {
+    const spec = currentTradePackage();
+    if (!spec) return "";
+    const salaryOut = spec.give.reduce((sum, p) => sum + p.salary, 0);
+    const salaryIn = spec.get.reduce((sum, p) => sum + p.salary, 0);
+    const before = userSalary();
+    const after = before - salaryOut + salaryIn;
+    const sendNames =
+      spec.give
+        .map((p) => p.name)
+        .concat(spec.userPickAssets.map(pickLabel))
+        .join(", ") || "—";
+    const getNames =
+      spec.get
+        .map((p) => p.name)
+        .concat(spec.otherPickAssets.map(pickLabel))
+        .join(", ") || "—";
+    return `<div class="modalShade" data-modal-shade><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modalHeader"><h3 id="modal-title">Confirm trade with ${escapeHtml(spec.other.name)}</h3><button class="close" data-close aria-label="Cancel trade">Close</button></div><div class="modalBody"><p class="muted">This move is destructive. Undo can reverse the last ${BALANCE.undoLimit || 5} transactions.</p><div class="layout2"><div class="logItem"><b>You send</b><p class="muted">${escapeHtml(sendNames)}</p></div><div class="logItem"><b>You receive</b><p class="muted">${escapeHtml(getNames)}</p></div></div><div class="meter"><span>Payroll before</span><div class="bar"><i style="width:${Math.min(100, (before / DATA.cap) * 100)}%"></i></div><b>${shortMoney(before)}</b></div><div class="meter"><span>Payroll after</span><div class="bar"><i style="width:${Math.min(100, (after / DATA.cap) * 100)}%"></i></div><b>${shortMoney(after)}</b></div><div class="actions" style="margin-top:18px"><button class="btn" data-action="confirmTrade">Confirm Trade</button><button class="btn secondary" data-close>Cancel</button></div></div></div></div>`;
   }
   if (modal.type === "hire-coach") {
     const role = modal.role;
@@ -2283,6 +2707,14 @@ function bindDelegatedEvents() {
     else if (target.dataset.loadSlot) loadSaveSlot(target.dataset.loadSlot);
     else if (target.dataset.deleteSlot) deleteSaveSlot(target.dataset.deleteSlot);
     else if (target.dataset.citytile) applyCity(+target.dataset.citytile);
+    else if (target.dataset.acceptOffer) acceptNpcOffer(target.dataset.acceptOffer);
+    else if (target.dataset.declineOffer) declineNpcOffer(target.dataset.declineOffer);
+    else if (target.dataset.resign) resignUserPlayer(target.dataset.resign);
+    else if (target.dataset.walk) walkUserPlayer(target.dataset.walk);
+    else if (target.dataset.rotateUp) moveRotation(target.dataset.rotateUp, -1);
+    else if (target.dataset.rotateDown) moveRotation(target.dataset.rotateDown, 1);
+    else if (target.dataset.sit) sitPlayer(target.dataset.sit);
+    else if (target.dataset.start) startPlayer(target.dataset.start);
   });
   appRoot.addEventListener("input", (event) => {
     const control = event.target;
@@ -2328,6 +2760,15 @@ function bindDelegatedEvents() {
     } else if (control.dataset.pick) {
       trade[control.dataset.pick === "user" ? "userPick" : "otherPick"] = control.checked ? 1 : 0;
       renderView();
+    } else if (control.dataset.tradePick) {
+      const side = control.dataset.tradePick;
+      const selected = new Set(trade[side] || []);
+      if (control.checked) selected.add(control.value);
+      else selected.delete(control.value);
+      trade[side] = Array.from(selected);
+      trade.userPick = 0;
+      trade.otherPick = 0;
+      renderView();
     }
   });
   appRoot.addEventListener(
@@ -2350,7 +2791,10 @@ function applyCity(i) {
 function actions(a) {
   if (a === "start") {
     S.started = true;
+    const previousAbbr = S.team.abbr;
     S.team.abbr = uniqueUserAbbr(S.team.city, S.team.nickname);
+    reassignUserPicks(previousAbbr, S.team.abbr);
+    ensurePickBoard(S);
     S.season = null;
     addLog(
       "Franchise approved",
@@ -2369,7 +2813,7 @@ function actions(a) {
       resetFaBase();
       S = normalizeSave(freshState());
       S.saveName = saveName;
-      lastUndo = null;
+      undoStack = [];
       tab = "setup";
       save();
       render();
@@ -2395,10 +2839,7 @@ function actions(a) {
     }
   }
   if (a === "clearTrade") {
-    trade.userGive = [];
-    trade.otherGive = [];
-    trade.userPick = 0;
-    trade.otherPick = 0;
+    resetTradeSelections();
     render();
   }
   if (a === "resetDraftFilters") {
@@ -2413,6 +2854,10 @@ function actions(a) {
     render();
   }
   if (a === "submitTrade") submitTrade();
+  if (a === "confirmTrade") {
+    closeModal();
+    executeTrade();
+  }
   if (a === "enterOffseason") enterOffseason();
   if (a === "advanceToDraft") advanceToDraft();
   if (a === "startNextSeason") startNextSeason();
@@ -2472,9 +2917,11 @@ function signPlayer(id) {
   S.freeAgents = (S.freeAgents || []).filter((x) => x.id !== id);
   p = clone(p);
   p.team = S.team.abbr;
+  p.lastTeam = p.lastTeam || "FA";
   p.injury = null;
+  p.years = Math.max(1, Number.isFinite(p.years) ? p.years : 1);
   S.roster.push(p);
-  addLog("Waiver signing", `${p.name} signed a one-year deal.`);
+  addLog("Waiver signing", `${p.name} signed a ${p.years}-year deal.`);
   render();
 }
 function submitTrade() {
@@ -2483,37 +2930,120 @@ function submitTrade() {
   if (!other) return toast("No trade partner available.");
   const ev = evaluateTrade(other);
   if (!ev.ok) return toast(ev.reason || "Trade rejected.");
-  if ((trade.userPick && S.picks.you < 1) || (trade.otherPick && S.picks.league < 1))
-    return toast("The selected draft pick is no longer available.");
+  modalReturnFocusSelector = '[data-action="submitTrade"]';
+  modal = { type: "trade-confirm" };
+  render();
+}
+function executeTrade(packageSpec) {
+  const spec = packageSpec || currentTradePackage();
+  if (!spec || !spec.other) return toast("No trade partner available.");
+  const ev = evaluateTrade(spec.other);
+  if (!ev.ok) return toast(ev.reason || "Trade rejected.");
   recordUndo("trade");
-  const give = S.roster.filter((p) => trade.userGive.includes(p.id));
-  const get = other.players.filter((p) => trade.otherGive.includes(p.id));
-  // Preserve each player's protected status across the trade. Forcing it to false
-  // permanently stripped protected stars league-wide once they were ever moved,
-  // which silently corrupted trade value, team needs and the draft "Locked" logic.
-  S.roster = S.roster
-    .filter((p) => !trade.userGive.includes(p.id))
-    .concat(get.map((p) => ({ ...p, team: S.team.abbr })));
-  other.players = other.players
-    .filter((p) => !trade.otherGive.includes(p.id))
-    .concat(give.map((p) => ({ ...p, team: other.id })));
-  if (trade.userPick) {
-    S.picks.you--;
-    S.picks.league++;
-  }
-  if (trade.otherPick) {
-    S.picks.you++;
-    S.picks.league--;
-  }
+  applyTradePackage(spec);
   addLog(
     "Trade completed",
-    `${S.team.nickname} acquired ${get.map((p) => p.name).join(", ") || "pick assets"} from ${other.name}. Sent ${give.map((p) => p.name).join(", ") || "pick assets"}.`,
+    `${S.team.nickname} acquired ${spec.get.map((p) => p.name).join(", ") || spec.otherPickAssets.map(pickLabel).join(", ") || "assets"} from ${spec.other.name}. Sent ${spec.give.map((p) => p.name).join(", ") || spec.userPickAssets.map(pickLabel).join(", ") || "assets"}.`,
   );
+  resetTradeSelections();
+  S.pendingOffers = (S.pendingOffers || []).filter(
+    (offer) => offer.from !== spec.other.id && offer.id !== spec.offerId,
+  );
+  toast("Trade accepted.");
+  render();
+}
+function currentTradePackage() {
+  const other = S.teams.find((t) => t.id === trade.team);
+  if (!other) return null;
+  return {
+    other,
+    give: S.roster.filter((p) => trade.userGive.includes(p.id)),
+    get: other.players.filter((p) => trade.otherGive.includes(p.id)),
+    userPickAssets: selectedPicks("user"),
+    otherPickAssets: selectedPicks("other"),
+  };
+}
+function applyTradePackage(spec) {
+  S.roster = S.roster
+    .filter((p) => !spec.give.some((player) => player.id === p.id))
+    .concat(spec.get.map((p) => ({ ...p, team: S.team.abbr, lastTeam: spec.other.id })));
+  spec.other.players = spec.other.players
+    .filter((p) => !spec.get.some((player) => player.id === p.id))
+    .concat(spec.give.map((p) => ({ ...p, team: spec.other.id, lastTeam: S.team.abbr })));
+  spec.userPickAssets.forEach((pick) => {
+    pick.owner = spec.other.id;
+  });
+  spec.otherPickAssets.forEach((pick) => {
+    pick.owner = S.team.abbr;
+  });
+  S.rotation = (S.rotation || []).filter((id) => S.roster.some((p) => p.id === id));
+  syncPickCounts(S);
+}
+function resetTradeSelections() {
   trade.userGive = [];
   trade.otherGive = [];
+  trade.userPicks = [];
+  trade.otherPicks = [];
   trade.userPick = 0;
   trade.otherPick = 0;
-  toast("Trade accepted.");
+}
+function generateNpcOffer() {
+  if (tradesLocked() || S.phase === "Expansion Build") return null;
+  if ((S.pendingOffers || []).length >= 2) return null;
+  if (!S.roster.length || !S.teams.length) return null;
+  const partner = S.teams[Math.floor(random() * S.teams.length)];
+  const need = teamNeed(partner);
+  const userFits = S.roster.filter((p) => !p.protected && p.pos.includes(need));
+  const want = (userFits.length ? userFits : S.roster.filter((p) => !p.protected))
+    .slice()
+    .sort((a, b) => tradeValue(a) - tradeValue(b))[0];
+  if (!want) return null;
+  const their = partner.players
+    .filter((p) => !p.protected)
+    .slice()
+    .sort(
+      (a, b) =>
+        Math.abs(tradeValue(a) - tradeValue(want)) - Math.abs(tradeValue(b) - tradeValue(want)),
+    )[0];
+  if (!their) return null;
+  if (
+    (S.pendingOffers || []).some(
+      (offer) => offer.from === partner.id && offer.wantPlayers.includes(want.id),
+    )
+  )
+    return null;
+  const offer = {
+    id: `offer-${S.year}-${S.week}-${partner.id}-${want.id}`,
+    from: partner.id,
+    theirPlayers: [their.id],
+    wantPlayers: [want.id],
+    theirPicks: [],
+    wantPicks: [],
+  };
+  if (!Array.isArray(S.pendingOffers)) S.pendingOffers = [];
+  S.pendingOffers.push(offer);
+  addLog("Trade offer", `${partner.name} inquired about ${want.name}.`);
+  return offer;
+}
+function acceptNpcOffer(offerId) {
+  const offer = (S.pendingOffers || []).find((item) => item.id === offerId);
+  if (!offer) return toast("That offer is gone.");
+  if (tradesLocked()) return toast("The trade deadline has passed.");
+  trade.team = offer.from;
+  trade.userGive = offer.wantPlayers.slice();
+  trade.otherGive = offer.theirPlayers.slice();
+  trade.userPicks = (offer.wantPicks || []).slice();
+  trade.otherPicks = (offer.theirPicks || []).slice();
+  trade.userPick = 0;
+  trade.otherPick = 0;
+  const spec = currentTradePackage();
+  if (!spec) return;
+  spec.offerId = offer.id;
+  executeTrade(spec);
+}
+function declineNpcOffer(offerId) {
+  S.pendingOffers = (S.pendingOffers || []).filter((offer) => offer.id !== offerId);
+  toast("Offer declined.");
   render();
 }
 function addLog(title, body) {
@@ -2526,6 +3056,10 @@ function marketChurn() {
       p.mood = Math.max(20, Math.min(99, (p.mood || 60) + Math.floor(random() * 11) - 5));
     }),
   );
+  S.roster.forEach((p) => {
+    p.mood = Math.max(20, Math.min(99, (p.mood || 60) + Math.floor(random() * 7) - 3));
+  });
+  if (random() < 0.35) generateNpcOffer();
 }
 
 // =================== OFFSEASON: aging + rookie draft =====================
@@ -2588,16 +3122,16 @@ function ageOnePlayer(p) {
     }
   }
   p.years = Math.max(0, p.years - 1);
+  if (!Number.isFinite(p.age)) p.age = 26;
+  p.age += 1;
   _compCache.delete(p);
-  return { name: p.name, team: p.team, before, after: composite(p), deltas };
+  return { name: p.name, team: p.team, age: p.age, before, after: composite(p), deltas };
 }
 function resolveExpiredContracts() {
   const expiredUser = S.roster.filter((player) => player.years <= 0);
-  const waivedIds = new Set(S.waived.map((player) => player.id));
   expiredUser.forEach((player) => {
-    if (!waivedIds.has(player.id)) S.waived.push(player);
+    player.lastTeam = S.team.abbr;
   });
-  S.roster = S.roster.filter((player) => player.years > 0);
   if (!Array.isArray(S.freeAgents)) S.freeAgents = [];
   const known = new Set([
     ...S.roster.map((player) => player.id),
@@ -2609,6 +3143,7 @@ function resolveExpiredContracts() {
     const expired = team.players.filter((player) => player.years <= 0);
     expired.forEach((player) => {
       if (known.has(player.id)) return;
+      player.lastTeam = team.id;
       player.team = "FA";
       S.freeAgents.push(player);
       known.add(player.id);
@@ -2618,6 +3153,87 @@ function resolveExpiredContracts() {
     expiredLeague += before - team.players.length;
   });
   return { user: expiredUser, leagueCount: expiredLeague };
+}
+function signNpcPlayer(team, player) {
+  if (!player || team.players.some((item) => item.id === player.id)) return false;
+  if (team.players.length >= DATA.rosterMax) return false;
+  if (teamSalary(team) + player.salary > DATA.cap) return false;
+  player.team = team.id;
+  player.lastTeam = team.id;
+  player.injury = null;
+  player.years = Math.max(1, Number.isFinite(player.years) && player.years > 0 ? player.years : 1);
+  team.players.push(player);
+  S.freeAgents = (S.freeAgents || []).filter((item) => item.id !== player.id);
+  S.waived = S.waived.filter((item) => item.id !== player.id);
+  return true;
+}
+function runNpcFreeAgency() {
+  S.teams.forEach((team) => {
+    const alumni = (S.freeAgents || [])
+      .filter((player) => player.lastTeam === team.id)
+      .slice()
+      .sort((a, b) => composite(b) - composite(a));
+    alumni.forEach((player) => {
+      if (team.players.length >= DATA.rosterMax) return;
+      if (team.players.length >= DATA.rosterMin && random() > 0.55) return;
+      signNpcPlayer(team, player);
+    });
+    let guard = 0;
+    while (team.players.length < DATA.rosterMin && guard++ < 20) {
+      const need = teamNeed(team);
+      const pool = waiverPool()
+        .filter((player) => !team.players.some((item) => item.id === player.id))
+        .slice()
+        .sort((a, b) => {
+          const bonusA = a.pos.includes(need) ? 12 : 0;
+          const bonusB = b.pos.includes(need) ? 12 : 0;
+          return composite(b) + bonusB - (composite(a) + bonusA);
+        });
+      const next = pool.find((player) => teamSalary(team) + player.salary <= DATA.cap);
+      if (!next) break;
+      if (!signNpcPlayer(team, clone(next))) break;
+    }
+    while (team.players.length > DATA.rosterMax) {
+      const extra = team.players
+        .slice()
+        .sort((a, b) => composite(a) - composite(b))
+        .find((player) => !player.protected);
+      if (!extra) break;
+      team.players = team.players.filter((player) => player.id !== extra.id);
+      extra.team = "FA";
+      extra.lastTeam = team.id;
+      S.freeAgents.push(extra);
+    }
+  });
+}
+function resignUserPlayer(id) {
+  if (!S.offseason || !Array.isArray(S.offseason.pendingResign)) return;
+  const player = S.offseason.pendingResign.find((item) => item.id === id);
+  if (!player) return;
+  if (userSalary() > DATA.cap) return toast("Not enough cap room to re-sign.");
+  recordUndo("re-sign");
+  player.years = 2;
+  player.team = S.team.abbr;
+  player.lastTeam = S.team.abbr;
+  if (!S.roster.some((item) => item.id === id)) S.roster.push(player);
+  S.offseason.pendingResign = S.offseason.pendingResign.filter((item) => item.id !== id);
+  addLog("Re-signed", `${player.name} agreed to a ${player.years}-year deal.`);
+  render();
+}
+function walkUserPlayer(id) {
+  if (!S.offseason || !Array.isArray(S.offseason.pendingResign)) return;
+  const player = S.offseason.pendingResign.find((item) => item.id === id);
+  if (!player) return;
+  recordUndo("walk");
+  S.roster = S.roster.filter((item) => item.id !== id);
+  S.rotation = (S.rotation || []).filter((item) => item !== id);
+  player.team = "FA";
+  player.lastTeam = S.team.abbr;
+  if (!Array.isArray(S.freeAgents)) S.freeAgents = [];
+  if (!S.freeAgents.some((item) => item.id === id)) S.freeAgents.push(player);
+  S.offseason.pendingResign = S.offseason.pendingResign.filter((item) => item.id !== id);
+  addLog("Contract ended", `${player.name} hit unrestricted free agency.`);
+  render();
 }
 function applyOffseasonAging() {
   const reports = [];
@@ -2788,6 +3404,7 @@ function generateRookieClass(year) {
         ratings,
         archetype: t.arch,
         mood: 60 + Math.floor(random() * 25),
+        age: 21 + rand(0, 2),
         injury: null,
       });
     }
@@ -2845,6 +3462,8 @@ function enterOffseason() {
   const reports = applyOffseasonAging();
   S.phase = `${S.year} Offseason`;
   const expirations = resolveExpiredContracts();
+  refreshWaiverClass(S.year + 1);
+  runNpcFreeAgency();
   const upcomingYear = S.year + 1;
   const base = S.year === 2026 ? clone(DATA.rookieClass2027) : generateRookieClass(upcomingYear);
   const dataExtras = (DATA.rookieClassExtras && DATA.rookieClassExtras[upcomingYear]) || [];
@@ -2859,8 +3478,9 @@ function enterOffseason() {
     picks: [],
     currentPickIdx: 0,
     expirations,
+    pendingResign: expirations.user.slice(),
   };
-  tab = "offseason";
+  tab = "schedule";
   addLog(
     "Offseason opened",
     `Season ${S.year} closed. Aging applied to ${reports.length} players league-wide.`,
@@ -2869,29 +3489,33 @@ function enterOffseason() {
   render();
 }
 function advanceToDraft() {
-  if (!S.offseason || S.offseason.stage !== "aging") return;
-  S.offseason.stage = "draft";
+  if (!S.offseason) return;
+  if (S.offseason.stage === "aging") {
+    S.offseason.stage =
+      S.offseason.pendingResign && S.offseason.pendingResign.length ? "contracts" : "draft";
+  } else if (S.offseason.stage === "contracts") {
+    if (S.offseason.pendingResign && S.offseason.pendingResign.length)
+      return toast("Resolve re-sign decisions first.");
+    S.offseason.stage = "draft";
+  } else return;
   save();
   render();
-  setTimeout(processAiPicks, 250);
+  if (S.offseason.stage === "draft") setTimeout(processAiPicks, 250);
 }
 function buildDraftOrder(classSize) {
-  const base = standingsRows()
-    .slice()
-    .reverse()
-    .map((row) => row.id);
-  const extras = [];
-  const order = [];
-  for (const id of base) {
-    if (id === S.team.abbr) {
-      const owned = Math.max(0, S.picks.you);
-      if (owned > 0) order.push(id);
-      for (let i = 1; i < owned; i++) extras.push(id);
-    } else {
-      order.push(id);
-    }
-  }
-  return order.concat(extras).slice(0, classSize);
+  const draftYear = S.year + 1;
+  const standings = standingsRows().slice().reverse();
+  const rank = Object.fromEntries(standings.map((row, index) => [row.id, index]));
+  const picks = (S.pickBoard || []).filter((pick) => pick.year === draftYear);
+  picks.sort(
+    (a, b) =>
+      a.round - b.round ||
+      (rank[a.original] ?? 99) - (rank[b.original] ?? 99) ||
+      String(a.id).localeCompare(String(b.id)),
+  );
+  const order = picks.map((pick) => pick.owner);
+  if (order.length) return order.slice(0, classSize);
+  return standings.map((row) => row.id).slice(0, classSize);
 }
 function resumeOffseasonDraft() {
   if (!S.offseason || S.offseason.stage !== "draft") return;
@@ -2938,12 +3562,13 @@ function processAiPicks() {
 }
 function aiPickRookie(teamId, available) {
   if (!available.length) return null;
-  return available
-    .slice()
-    .sort(
-      (a, b) =>
-        composite(b) + b.ratings.potential * 0.6 - (composite(a) + a.ratings.potential * 0.6),
-    )[0];
+  const team = S.teams.find((item) => item.id === teamId);
+  const need = team ? teamNeed(team) : "G";
+  return available.slice().sort((a, b) => {
+    const score = (player) =>
+      composite(player) + player.ratings.potential * 0.6 + (player.pos.includes(need) ? 20 : 0);
+    return score(b) - score(a);
+  })[0];
 }
 function userPickRookie(playerId) {
   if (!S.offseason || S.offseason.stage !== "draft") return;
@@ -2979,7 +3604,14 @@ function startNextSeason() {
     return toast("Resolve roster and cap requirements before starting the season.");
   S.year++;
   S.phase = `${S.year} Regular Season`;
+  consumeDraftYearPicks(S.year);
+  grantUpcomingPicks(S);
+  refreshWaiverClass(S.year);
   S.season = null;
+  S.pendingOffers = [];
+  S.gameDay = null;
+  S.postGame = null;
+  S.playoffs = null;
   clearAllInjuries();
   ensureSeason(true);
   S.offseason = null;
@@ -2994,6 +3626,7 @@ function startNextSeason() {
 function offseasonView() {
   if (!S.offseason) return '<div class="empty">No offseason in progress.</div>';
   if (S.offseason.stage === "aging") return offseasonAgingView();
+  if (S.offseason.stage === "contracts") return offseasonContractsView();
   if (S.offseason.stage === "draft") return offseasonDraftView();
   return offseasonDoneView();
 }
@@ -3017,13 +3650,28 @@ function offseasonAgingView() {
     const ds = Object.entries(r.deltas)
       .map(([k, v]) => `<span class="tag">${k} ${v > 0 ? "+" + v : v}</span>`)
       .join("");
-    return `<tr><td><b>${escapeHtml(r.name)}</b></td><td><span class="pill">${escapeHtml(r.team)}</span></td><td>${arrow}</td><td>${ds || '<span class="mini">no change</span>'}</td></tr>`;
+    return `<tr><td><b>${escapeHtml(r.name)}</b></td><td><span class="pill">${escapeHtml(r.team)}</span></td><td>${r.age || "—"}</td><td>${arrow}</td><td>${ds || '<span class="mini">no change</span>'}</td></tr>`;
   };
-  const expired = (S.offseason.expirations && S.offseason.expirations.user) || [];
+  const expired =
+    S.offseason.pendingResign || (S.offseason.expirations && S.offseason.expirations.user) || [];
   const expirationBlock = expired.length
-    ? `<div class="callout" style="margin-bottom:18px"><b>${expired.length} contract(s) expired</b><p class="muted">${expired.map((player) => escapeHtml(player.name)).join(", ")} moved to Waivers / Free Agency. Re-sign them there or replace them before next season.</p><button class="btn secondary" data-tab="waivers">Open Free Agency</button></div>`
+    ? `<div class="callout" style="margin-bottom:18px"><b>${expired.length} contract(s) expired</b><p class="muted">${expired.map((player) => escapeHtml(player.name)).join(", ")} need a re-sign or walk decision before the draft.</p></div>`
     : "";
-  return `<section class="card"><div class="sectionTitle"><h3>Year ${S.year} · Offseason Aging Report</h3><span>Year ${S.year + 1} rookie class is next</span></div><div class="cardPad">${expirationBlock}<h3>Your Roster</h3><table class="table"><thead><tr><th>Player</th><th>Team</th><th>Composite</th><th>Notable shifts</th></tr></thead><tbody>${userReports.map(row).join("") || '<tr><td colspan="4"><div class="empty">No roster players to age.</div></td></tr>'}</tbody></table><h3 style="margin-top:18px">Notable League Changes</h3><table class="table"><thead><tr><th>Player</th><th>Team</th><th>Composite</th><th>Notable shifts</th></tr></thead><tbody>${leagueChangers.map(row).join("")}</tbody></table><div class="actions" style="margin-top:18px"><button class="btn" data-action="advanceToDraft">Continue to Rookie Draft</button></div></div></section>`;
+  const continueLabel = expired.length ? "Continue to Free Agency" : "Continue to Rookie Draft";
+  return `<section class="card"><div class="sectionTitle"><h3>Year ${S.year} · Offseason Aging Report</h3><span>Year ${S.year + 1} rookie class is next</span></div><div class="cardPad">${expirationBlock}<h3>Your Roster</h3><table class="table"><thead><tr><th>Player</th><th>Team</th><th>Age</th><th>Composite</th><th>Notable shifts</th></tr></thead><tbody>${userReports.map(row).join("") || '<tr><td colspan="5"><div class="empty">No roster players to age.</div></td></tr>'}</tbody></table><h3 style="margin-top:18px">Notable League Changes</h3><table class="table"><thead><tr><th>Player</th><th>Team</th><th>Age</th><th>Composite</th><th>Notable shifts</th></tr></thead><tbody>${leagueChangers.map(row).join("")}</tbody></table><div class="actions" style="margin-top:18px"><button class="btn" data-action="advanceToDraft">${continueLabel}</button></div></div></section>`;
+}
+function offseasonContractsView() {
+  const pending = S.offseason.pendingResign || [];
+  if (!pending.length) {
+    return `<section class="card"><div class="cardPad"><p class="muted">No remaining contract decisions.</p><div class="actions"><button class="btn" data-action="advanceToDraft">Continue to Rookie Draft</button></div></div></section>`;
+  }
+  const cards = pending
+    .map((player) => {
+      const overCap = userSalary() > DATA.cap;
+      return `<div class="playerCard">${portraitHtml(player)}<div><span class="playerName">${escapeHtml(player.name)}</span> <span class="pill">${escapeHtml(player.pos)}</span><div class="scout">${escapeHtml(player.scouting || "")}</div><div class="tags"><span class="tag">${shortMoney(player.salary)}</span><span class="tag">Age ${player.age || "—"}</span><span class="tag">${visibleGrade(player)}</span></div></div><div class="actions"><button class="btn" data-resign="${escapeAttr(player.id)}" ${overCap ? "disabled" : ""}>Re-sign 2 years</button><button class="btn secondary" data-walk="${escapeAttr(player.id)}">Let walk</button></div></div>`;
+    })
+    .join("");
+  return `<section class="card"><div class="sectionTitle"><h3>Re-sign or walk</h3><span>${pending.length} expired</span></div><div class="cardPad"><p class="muted">League free agents are in the same pool as waivers. NPC clubs already re-signed or replaced down to 11–12. Walks join that pool.</p><div class="board">${cards}</div><div class="actions" style="margin-top:18px"><button class="btn" data-action="advanceToDraft" ${pending.length ? "disabled" : ""}>Continue to Rookie Draft</button><button class="btn secondary" data-tab="waivers">Open Free Agency</button></div></div></section>`;
 }
 function offseasonDraftView() {
   const os = S.offseason;
@@ -3394,7 +4042,21 @@ function compactAwardEntry(entry) {
     compositeEnd: composite(entry.p),
   };
 }
+function userPlayoffResult() {
+  if (!S.playoffs) return "Missed playoffs";
+  if (S.playoffs.champion === S.team.abbr) return "Champion";
+  const rounds = S.playoffs.rounds || [];
+  const played = (round) =>
+    round &&
+    round.series &&
+    round.series.some((series) => series.top === S.team.abbr || series.bot === S.team.abbr);
+  if (played(rounds[2])) return "Finals";
+  if (played(rounds[1])) return "Semifinals";
+  if (played(rounds[0])) return "Round 1";
+  return "Missed playoffs";
+}
 function compactSeasonAwards(awards) {
+  const record = seasonRecord(S.team.abbr);
   return {
     year: awards.year,
     champion: awards.champion,
@@ -3403,6 +4065,8 @@ function compactSeasonAwards(awards) {
     roy: compactAwardEntry(awards.roy),
     mip: compactAwardEntry(awards.mip),
     allLeague: (awards.allLeague || []).map(compactAwardEntry),
+    userRecord: { w: record.w, l: record.l },
+    playoffResult: userPlayoffResult(),
   };
 }
 function historyView() {
@@ -3414,7 +4078,9 @@ function historyView() {
   return `<section class="card"><div class="sectionTitle"><h3>Franchise History</h3><span>${seasons.length} season(s)</span></div><div class="cardPad log">${seasons
     .map((season) => {
       const champion = season.champion ? escapeHtml(teamMeta(season.champion).name) : "—";
-      return `<div class="logItem"><div class="sectionTitle"><h3>${season.year} Season</h3><span>${champion} champions</span></div><div class="layout3 historyAwards"><p><b>MVP</b><br>${entryName(season.mvp)}</p><p><b>DPOY</b><br>${entryName(season.dpoy)}</p><p><b>Rookie of the Year</b><br>${entryName(season.roy)}</p></div></div>`;
+      const record = season.userRecord ? `${season.userRecord.w}-${season.userRecord.l}` : "—";
+      const allLeague = (season.allLeague || []).map(entryName).filter((name) => name !== "—");
+      return `<div class="logItem"><div class="sectionTitle"><h3>${season.year} Season</h3><span>${escapeHtml(season.playoffResult || "—")} · ${record}</span></div><p class="muted">${champion} champions</p><div class="layout3 historyAwards"><p><b>MVP</b><br>${entryName(season.mvp)}</p><p><b>DPOY</b><br>${entryName(season.dpoy)}</p><p><b>Rookie of the Year</b><br>${entryName(season.roy)}</p><p><b>MIP</b><br>${entryName(season.mip)}</p><p><b>Your record</b><br>${record}</p><p><b>Playoff result</b><br>${escapeHtml(season.playoffResult || "—")}</p></div>${allLeague.length ? `<p class="mini" style="margin-top:8px"><b>All-League:</b> ${allLeague.join(", ")}</p>` : ""}</div>`;
     })
     .join("")}</div></section>`;
 }
@@ -3441,7 +4107,7 @@ function awardsView() {
 }
 function openAwards() {
   if (!S.pendingAwards) S.pendingAwards = computeAwards();
-  tab = "awards";
+  tab = "schedule";
   save();
   render();
 }
@@ -3599,7 +4265,7 @@ function applyWeeklyTransition(week = S.week) {
 function rollInjuries(g) {
   const checkTeam = (id) => {
     const team = teamMeta(id);
-    const top = healthyRotation(team.players, 8);
+    const top = healthyRotation(team.players, 8, id);
     top.forEach((p) => {
       if (random() < BALANCE.injuryRate) {
         const r = random();
@@ -3998,6 +4664,7 @@ function addCustomRookie() {
     ratings,
     archetype,
     mood: 65,
+    age: 22,
     injury: null,
   });
   save();
@@ -4025,9 +4692,23 @@ if (
   "serviceWorker" in navigator &&
   location.protocol !== "file:"
 ) {
-  navigator.serviceWorker.register("./sw.js").catch((error) => {
-    console.warn("Offline cache registration failed", error);
-  });
+  navigator.serviceWorker
+    .register("./sw.js")
+    .then((reg) => {
+      if (reg.waiting && navigator.serviceWorker.controller)
+        toast("A new version is ready. Refresh to update.");
+      reg.addEventListener("updatefound", () => {
+        const worker = reg.installing;
+        if (!worker) return;
+        worker.addEventListener("statechange", () => {
+          if (worker.state === "installed" && navigator.serviceWorker.controller)
+            toast("A new version is ready. Refresh to update.");
+        });
+      });
+    })
+    .catch((error) => {
+      console.warn("Offline cache registration failed", error);
+    });
 }
 
 // Node-only export surface for unit tests. `module` is undefined in the browser,
@@ -4076,6 +4757,28 @@ if (typeof module !== "undefined" && module.exports) {
     clearAllInjuries,
     marketChurn,
     firstTag,
+    ownedPicks,
+    executeTrade,
+    aiPickRookie,
+    refreshWaiverClass,
+    generateYearlyWaivers,
+    runNpcFreeAgency,
+    resignUserPlayer,
+    walkUserPlayer,
+    userPlayoffResult,
+    compactSeasonAwards,
+    generateNpcOffer,
+    tradesLocked,
+    pickTradeValue,
+    ensurePickBoard,
+    grantUpcomingPicks,
+    consumeDraftYearPicks,
+    enterOffseason,
+    sitPlayer,
+    startPlayer,
+    expansionDraftOpen,
+    applyBulkCoaching,
+    rotationMood,
     get S() {
       return S;
     },
@@ -4090,6 +4793,12 @@ if (typeof module !== "undefined" && module.exports) {
     },
     get draftFilters() {
       return draftFilters;
+    },
+    get undoStack() {
+      return undoStack;
+    },
+    set undoStack(v) {
+      undoStack = v;
     },
   };
 }

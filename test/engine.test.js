@@ -150,6 +150,8 @@ test("evaluateTrade rejects an empty package", () => {
     team: other.id,
     userGive: [],
     otherGive: [],
+    userPicks: [],
+    otherPicks: [],
     userPick: 0,
     otherPick: 0,
     query: "",
@@ -161,12 +163,14 @@ test("evaluateTrade rejects an empty package", () => {
 test("evaluateTrade rejects a pick the user no longer owns", () => {
   const g = loadGame(1);
   const other = g.S.teams[0];
-  g.S.picks.you = 0;
+  g.S.pickBoard = [];
   g.trade = {
     team: other.id,
     userGive: [],
     otherGive: [other.players[0].id],
-    userPick: 1,
+    userPicks: ["missing-pick"],
+    otherPicks: [],
+    userPick: 0,
     otherPick: 0,
     query: "",
   };
@@ -203,7 +207,7 @@ test("weekly development applies at most once for the same week", () => {
   assert.strictEqual(player.ratings.scoring, afterFirst);
 });
 
-test("expired contracts leave payroll and enter the waiver pool", () => {
+test("expired contracts stay on roster until the player walks", () => {
   const g = loadGame(4);
   const expired = mkPlayer(60, { id: "expired", years: 0 });
   const active = mkPlayer(60, { id: "active", years: 1 });
@@ -211,10 +215,16 @@ test("expired contracts leave payroll and enter the waiver pool", () => {
   const result = g.resolveExpiredContracts();
   assert.deepStrictEqual(
     g.S.roster.map((p) => p.id),
+    ["expired", "active"],
+  );
+  assert.strictEqual(result.user.length, 1);
+  g.S.offseason = { pendingResign: result.user };
+  g.walkUserPlayer("expired");
+  assert.deepStrictEqual(
+    g.S.roster.map((p) => p.id),
     ["active"],
   );
-  assert.ok(g.S.waived.some((p) => p.id === "expired"));
-  assert.strictEqual(result.user.length, 1);
+  assert.ok(g.S.freeAgents.some((p) => p.id === "expired"));
 });
 
 test("expired league contracts enter free agency instead of vanishing", () => {
@@ -385,10 +395,32 @@ test("buildDraftOrder uses pick inventory", () => {
     ),
     results: [],
   };
-  g.S.picks.you = 0;
+  g.S.pickBoard = g.S.teams.map((team) => ({
+    id: `${team.id}-2027-1`,
+    year: 2027,
+    round: 1,
+    original: team.id,
+    owner: team.id,
+  }));
   assert.ok(!g.buildDraftOrder(14).includes(g.S.team.abbr));
-  g.S.picks.you = 3;
-  const withExtras = g.buildDraftOrder(20);
+  g.S.pickBoard.push(
+    {
+      id: `${g.S.team.abbr}-2027-1`,
+      year: 2027,
+      round: 1,
+      original: g.S.team.abbr,
+      owner: g.S.team.abbr,
+    },
+    {
+      id: `${g.S.team.abbr}-2027-2`,
+      year: 2027,
+      round: 2,
+      original: g.S.team.abbr,
+      owner: g.S.team.abbr,
+    },
+    { id: `ATL-2027-2`, year: 2027, round: 2, original: "ATL", owner: g.S.team.abbr },
+  );
+  const withExtras = g.buildDraftOrder(40);
   assert.strictEqual(withExtras.filter((id) => id === g.S.team.abbr).length, 3);
 });
 
@@ -403,4 +435,161 @@ test("firstTag is safe on missing strength text", () => {
   const g = loadGame(1);
   assert.strictEqual(g.firstTag(undefined), "—");
   assert.strictEqual(g.firstTag("Shooting, Pace"), "Shooting");
+});
+
+test("trading a year-stamped pick changes who owns that draft slot", () => {
+  const g = loadGame(1);
+  const other = g.S.teams[0];
+  g.ensurePickBoard(g.S);
+  const pick = g.ownedPicks(g.S.team.abbr)[0];
+  assert.ok(pick);
+  g.S.roster = [mkPlayer(70, { id: "give-1", salary: 200000, protected: false })];
+  other.players[0].salary = 200000;
+  other.players[0].protected = false;
+  g.trade = {
+    team: other.id,
+    userGive: ["give-1"],
+    otherGive: [other.players[0].id],
+    userPicks: [pick.id],
+    otherPicks: [],
+    userPick: 0,
+    otherPick: 0,
+    query: "",
+  };
+  g.executeTrade();
+  assert.strictEqual(pick.owner, other.id);
+  assert.ok(g.ownedPicks(other.id).some((item) => item.id === pick.id));
+  assert.ok(!g.ownedPicks(g.S.team.abbr).some((item) => item.id === pick.id));
+});
+
+test("NPC free agency restocks thin rosters to 11-12", () => {
+  const g = loadGame(5);
+  const team = g.S.teams[0];
+  const leftover = team.players.slice(0, 8);
+  leftover.forEach((player) => {
+    player.years = 2;
+    player.salary = 200000;
+  });
+  team.players = leftover;
+  g.S.freeAgents = [
+    mkPlayer(62, { id: "fa-g", pos: "G", lastTeam: team.id, years: 1, salary: 200000 }),
+    mkPlayer(60, { id: "fa-f", pos: "F", lastTeam: "FA", years: 1, salary: 200000 }),
+    mkPlayer(58, { id: "fa-c", pos: "C", lastTeam: "FA", years: 1, salary: 200000 }),
+    mkPlayer(57, { id: "fa-g2", pos: "G", lastTeam: "FA", years: 1, salary: 200000 }),
+  ];
+  g.runNpcFreeAgency();
+  assert.ok(team.players.length >= 11);
+  assert.ok(team.players.length <= 12);
+});
+
+test("refreshWaiverClass replaces the five-name base list", () => {
+  const g = loadGame(8);
+  const first = g
+    .waiverPool()
+    .slice(0, 5)
+    .map((p) => p.id);
+  g.refreshWaiverClass(2028);
+  const next = g
+    .waiverPool()
+    .slice(0, 5)
+    .map((p) => p.id);
+  assert.notDeepStrictEqual(next, first);
+  assert.ok(next.every((id) => String(id).includes("2028")));
+});
+
+test("signPlayer logs the contract length on the card", () => {
+  const g = loadGame(3);
+  const logs = [];
+  const player = g.waiverPool()[0];
+  player.years = 3;
+  g.S.roster = [];
+  g.S.log = logs;
+  g.signPlayer(player.id);
+  assert.ok(g.S.roster.some((item) => item.id === player.id));
+  assert.match(g.S.log[0].body, /3-year deal/);
+});
+
+test("ageOnePlayer increments age and reports it", () => {
+  const g = loadGame(2);
+  const player = mkPlayer(70, { age: 27, years: 2, ratings: { ...ratings(70), potential: 70 } });
+  const report = g.ageOnePlayer(player);
+  assert.strictEqual(player.age, 28);
+  assert.strictEqual(report.age, 28);
+});
+
+test("healthyRotation follows the user sit/start order", () => {
+  const g = loadGame(1);
+  const benchStar = mkPlayer(90, { id: "star", pos: "G" });
+  const starter = mkPlayer(60, { id: "role", pos: "G" });
+  g.S.roster = [benchStar, starter];
+  g.S.rotation = ["role"];
+  const rotation = g.healthyRotation(g.S.roster, 2, g.S.team.abbr);
+  assert.strictEqual(rotation[0].id, "role");
+  assert.strictEqual(rotation[1].id, "star");
+});
+
+test("mood changes simScore in a tiny, deterministic way", () => {
+  const low = loadGame(11);
+  const high = loadGame(11);
+  const home = low.S.teams[0].id;
+  const away = low.S.teams[1].id;
+  low.S.teams[0].players.forEach((p) => (p.mood = 20));
+  high.S.teams[0].players.forEach((p) => (p.mood = 99));
+  const a = low.simScore(home, away);
+  const b = high.simScore(home, away);
+  assert.ok(b.hs > a.hs);
+});
+
+test("aiPickRookie prefers the calling team's positional need", () => {
+  const g = loadGame(4);
+  const team = g.S.teams[0];
+  team.players = [
+    mkPlayer(80, { id: "g1", pos: "G" }),
+    mkPlayer(80, { id: "g2", pos: "G" }),
+    mkPlayer(80, { id: "g3", pos: "G" }),
+    mkPlayer(80, { id: "f1", pos: "F" }),
+    mkPlayer(80, { id: "f2", pos: "F" }),
+  ];
+  const available = [
+    mkPlayer(88, { id: "best-g", pos: "G", ratings: { ...ratings(88), potential: 90 } }),
+    mkPlayer(80, { id: "need-c", pos: "C", ratings: { ...ratings(80), potential: 80 } }),
+  ];
+  const chosen = g.aiPickRookie(team.id, available);
+  assert.strictEqual(chosen.id, "need-c");
+});
+
+test("undo stack keeps the last N recorded states", () => {
+  const g = loadGame(1);
+  g.undoStack = [];
+  g.S.roster = [mkPlayer(70, { id: "keep" })];
+  const id = g.waiverPool()[0].id;
+  g.signPlayer(id);
+  assert.ok(g.undoStack.length >= 1);
+  assert.ok(g.undoStack[0].label.includes("signing"));
+});
+
+test("compact awards keep MIP, All-League, record, and playoff result", () => {
+  const g = loadGame(1);
+  g.S.started = true;
+  g.S.season = {
+    schedule: [],
+    records: { [g.S.team.abbr]: { w: 22, l: 18, pf: 0, pa: 0, streak: "W1" } },
+    results: [],
+  };
+  g.S.playoffs = { champion: g.S.team.abbr, rounds: [] };
+  const player = mkPlayer(80, { id: "mvp", name: "Star" });
+  player.seasonStats = { gp: 20, pts: 400, reb: 80, ast: 80, w: 14 };
+  const packed = g.compactSeasonAwards({
+    year: 2026,
+    champion: g.S.team.abbr,
+    mvp: { p: player, teamId: g.S.team.abbr },
+    dpoy: { p: player, teamId: g.S.team.abbr },
+    roy: null,
+    mip: { p: player, teamId: g.S.team.abbr },
+    allLeague: [{ p: player, teamId: g.S.team.abbr }],
+  });
+  assert.strictEqual(packed.userRecord.w, 22);
+  assert.strictEqual(packed.playoffResult, "Champion");
+  assert.strictEqual(packed.mip.name, "Star");
+  assert.strictEqual(packed.allLeague[0].name, "Star");
 });

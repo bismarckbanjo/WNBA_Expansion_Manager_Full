@@ -17,10 +17,16 @@ window.GAME_BALANCE = Object.freeze({
   statShareWeights: Object.freeze([1, 0.82, 0.66, 0.5, 0.4, 0.3, 0.22, 0.16]),
   homeAdvantage: 2.2,
   injuryRate: 0.022,
+  moodScoreScale: 0.04,
+  tradeDeadlineWeek: 12,
+  undoLimit: 5,
   trade: Object.freeze({
     minimumRatio: 0.92,
     goodRatio: 1,
     strongRatio: 1.15,
     protectedRatio: 1.25,
+    pickRound1: 420,
+    pickRound2: 160,
+    pickYearBonus: 20,
   }),
 });
