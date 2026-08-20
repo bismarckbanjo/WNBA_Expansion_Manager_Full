@@ -964,6 +964,31 @@ test("green-light exit marks a restless player trade-blessed", () => {
   assert.strictEqual(g.S.roster[0].tradeBlessed, true);
 });
 
+test("locker room copy explains campaign and culture tracks", () => {
+  const g = loadGame(1);
+  g.S.started = true;
+  const html = g.lockerRoomSection();
+  assert.match(html, /How the locker room works/);
+  assert.match(html, /Young Lab/);
+  assert.match(html, /Start a Mentor plus a Sponge or Gym Rat/);
+  assert.match(html, /Campaign/);
+  assert.match(html, /Front office pushes her for awards/);
+  assert.match(html, /Closed door/);
+  assert.match(html, /Green-light exit/);
+  assert.match(html, /Playoff Grit/);
+  assert.match(html, /Star Vehicle/);
+  assert.strictEqual(g.pairingStatusNoun("pact"), "run-it-back pact");
+  assert.strictEqual(g.pairingStatusNoun("paired"), "on-court pair");
+});
+
+test("persona chips carry a hover description", () => {
+  const g = loadGame(1);
+  const html = g.personaChip({ persona: "mentor" });
+  assert.match(html, /title="/);
+  assert.match(html, /Takes young players under her wing/);
+  assert.match(g.helpMark("Sit-down."), /aria-label="Sit-down\."/);
+});
+
 test("harvest hometown discount tags a high-bond mentor", () => {
   const g = loadGame(1);
   const mentor = mkPlayer(80, {

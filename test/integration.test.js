@@ -82,6 +82,20 @@ itDom("full season + playoffs sim runs and renders without throwing", () => {
   assert.match(html, /Awards/);
 });
 
+itDom("coaching tab shows locker-room helper copy", () => {
+  const w = boot();
+  w.actions("start");
+  w.document.querySelector('[data-tab="coaching"]').click();
+  const html = w.document.getElementById("app").innerHTML;
+  assert.match(html, /How the locker room works/);
+  assert.match(html, /Young Lab/);
+  assert.match(html, /Start a Mentor plus a Sponge or Gym Rat/);
+  assert.match(html, /Campaign/);
+  assert.match(html, /Green-light exit/);
+  assert.ok(w.document.querySelector('[data-action="campaignPlayer"][title]'));
+  assert.ok(w.document.querySelector('[data-culture="lab"]'));
+});
+
 itDom("a malicious team nickname is HTML-escaped in the live DOM", () => {
   const w = boot();
   const payload = 'PWN"><img src=x onerror=hack()>';

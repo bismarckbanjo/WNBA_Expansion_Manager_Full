@@ -50,3 +50,14 @@ test("dashboard and player dialog have no critical automated accessibility viola
   assert.ok(dialog, "player scout should render as a modal dialog");
   assert.strictEqual((await criticalViolations(window)).length, 0);
 });
+
+test("coaching locker room has no critical automated accessibility violations", async () => {
+  const window = boot();
+  window.actions("start");
+  window.document.querySelector('[data-tab="coaching"]').click();
+  const html = window.document.getElementById("app").innerHTML;
+  assert.match(html, /How the locker room works/);
+  assert.match(html, /Young Lab/);
+  assert.match(html, /Campaign/);
+  assert.strictEqual((await criticalViolations(window)).length, 0);
+});
