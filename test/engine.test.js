@@ -832,6 +832,7 @@ test("closed-door influence cools one player and spends the week", () => {
   assert.strictEqual(g.S.lockerRoom.influence, 0);
   assert.ok(g.S.roster[0].mood > 50);
   assert.ok(g.S.roster[1].mood < 60);
+  assert.strictEqual(g.S.lockerRoom.suppressedUntilWeek, 6);
 });
 
 test("team chemistry multiplier drops for a tense user rotation", () => {
@@ -977,6 +978,10 @@ test("locker room copy explains campaign and culture tracks", () => {
   assert.match(html, /Green-light exit/);
   assert.match(html, /Playoff Grit/);
   assert.match(html, /Star Vehicle/);
+  assert.match(html, /all tick in the same week/);
+  assert.match(html, /tightens playoff games by \+2/);
+  assert.match(html, /\+160/);
+  assert.match(html, /Room is calm/);
   assert.strictEqual(g.pairingStatusNoun("pact"), "run-it-back pact");
   assert.strictEqual(g.pairingStatusNoun("paired"), "on-court pair");
 });
@@ -987,6 +992,65 @@ test("persona chips carry a hover description", () => {
   assert.match(html, /title="/);
   assert.match(html, /Takes young players under her wing/);
   assert.match(g.helpMark("Sit-down."), /aria-label="Sit-down\."/);
+});
+
+test("closed-door chemistry suppress lifts the multiplier while it lasts", () => {
+  const g = loadGame(1);
+  g.S.roster = [
+    mkPlayer(80, { id: "q1", pos: "G", persona: "quiet-pro", hiddenTrait: "drama-prone" }),
+    mkPlayer(80, { id: "v1", pos: "G", persona: "vocal-leader", hiddenTrait: "instigator" }),
+    mkPlayer(80, { id: "q2", pos: "F", persona: "quiet-pro" }),
+    mkPlayer(80, { id: "m1", pos: "F", persona: "media-darling" }),
+    mkPlayer(80, { id: "f1", pos: "C", persona: "flashy" }),
+    mkPlayer(80, { id: "c1", pos: "C", persona: "competitor" }),
+    mkPlayer(80, { id: "g1", pos: "G", persona: "gym-rat" }),
+    mkPlayer(80, { id: "l1", pos: "F", persona: "locker-glue" }),
+  ];
+  g.S.rotation = g.S.roster.map((p) => p.id);
+  g.S.week = 4;
+  g.S.lockerRoom.heat = 20;
+  g.S.lockerRoom.suppressedUntilWeek = 6;
+  g.clearComputeCaches();
+  const cooled = g.teamChemistryMult(g.S.team.abbr);
+  g.S.lockerRoom.suppressedUntilWeek = 0;
+  g.clearComputeCaches();
+  const hot = g.teamChemistryMult(g.S.team.abbr);
+  assert.ok(cooled > hot);
+});
+
+test("cultureFlags.calm is true only under tension 25", () => {
+  const g = loadGame(1);
+  assert.strictEqual(g.ENGINE.cultureFlags([mkPlayer(80)], 10, null).calm, true);
+  assert.strictEqual(g.ENGINE.cultureFlags([mkPlayer(80)], 25, null).calm, false);
+});
+
+test("green-lit player adds a visible trade-value bump", () => {
+  const g = loadGame(1);
+  const outgoing = mkPlayer(80, {
+    id: "out",
+    name: "Outgoing",
+    persona: "competitor",
+    wantsOut: true,
+    tradeBlessed: true,
+    pos: "G",
+  });
+  g.S.roster = [outgoing];
+  const other = g.S.teams[0];
+  g.trade = {
+    team: other.id,
+    userGive: ["out"],
+    otherGive: [other.players[0].id],
+    userPicks: [],
+    otherPicks: [],
+    userPick: 0,
+    otherPick: 0,
+    query: "",
+  };
+  const ev = g.evaluateTrade(other);
+  assert.ok(ev.advice.some((line) => /green-lit/i.test(line) && /\+160/.test(line)));
+  const html = g.rosterTable(g.S.roster);
+  assert.match(html, /<th[^>]*>Bond<\/th>/);
+  assert.match(html, />50<\/td>/);
 });
 
 test("harvest hometown discount tags a high-bond mentor", () => {

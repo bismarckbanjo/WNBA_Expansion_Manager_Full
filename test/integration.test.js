@@ -92,6 +92,8 @@ itDom("coaching tab shows locker-room helper copy", () => {
   assert.match(html, /Start a Mentor plus a Sponge or Gym Rat/);
   assert.match(html, /Campaign/);
   assert.match(html, /Green-light exit/);
+  assert.match(html, /all tick in the same week/);
+  assert.match(html, /tightens playoff games by \+2/);
   assert.ok(w.document.querySelector('[data-action="campaignPlayer"][title]'));
   assert.ok(w.document.querySelector('[data-culture="lab"]'));
 });

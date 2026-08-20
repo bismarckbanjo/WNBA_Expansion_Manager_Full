@@ -976,11 +976,11 @@ const CULTURE_HELP = {
 };
 const INFLUENCE_HELP = {
   closedDoor:
-    "Sit-down. Raises her mood and cools the room. If she is not your star, the star may bristle.",
+    "Sit-down. Raises her mood and cools the room for 2 weeks (tension hurts play less). If she is not your star, the star may bristle.",
   campaign:
     "Front office pushes her for awards (MVP / Rookie of the Year). One campaign at a time.",
   bless:
-    "Only works if she wants out. Lets you trade her without cratering a run-it-back pact, and other teams value the deal a bit more.",
+    "Only works if she wants out. Lets you trade her without cratering a run-it-back pact, and the trade desk adds +160 value to the package.",
 };
 function lockerReadForPlayer(player) {
   if (!player) return "";
@@ -991,16 +991,22 @@ function lockerReadForPlayer(player) {
   if (player.wantsOut) bits.push("She has filed: she wants a bigger role, or a way out.");
   else if ((player.sitStreak || 0) >= 2) bits.push(`Sat the last ${player.sitStreak} games.`);
   if (player.tradeBlessed)
-    bits.push("You green-lit her exit. She can be moved without cratering a pact partner.");
+    bits.push(
+      "You green-lit her exit. She can be moved without cratering a pact partner, and the trade desk adds extra value.",
+    );
   return `<h3>With this franchise</h3><p class="muted">${escapeHtml(bits.join(" "))}</p>${pairingChipsFor(player)}`;
 }
 function userLockerReport() {
   const players = healthyRotation(S.roster, 8, S.team.abbr);
   const report = ENGINE.tensionReport(players, DATA.personality || {});
+  const tension = teamTensionScore(S.team.abbr);
+  const star = rosterStar();
+  const flags = ENGINE.cultureFlags(players, tension, star && star.id);
   return {
     ...report,
-    tension: teamTensionScore(S.team.abbr),
+    tension,
     chemistry: teamChemistryMult(S.team.abbr),
+    calm: !!flags.calm,
   };
 }
 function portraitHtml(player, size) {
@@ -1426,7 +1432,7 @@ function roster() {
   return `${kpis()}<div class="layout2"><section class="card"><div class="sectionTitle"><h3>Cap Sheet</h3><span>${money(userSalary())} / ${money(DATA.cap)}</span></div>${rosterTable(S.roster)}</section><section class="card"><div class="sectionTitle"><h3>Roster Tools</h3><span>rotation control</span></div><div class="cardPad"><div class="impact">${impactBars()}</div><hr style="border:0;border-top:1px solid var(--line);margin:18px 0"><h3>Position Balance</h3>${positionBalance()}<h3>Recommended Next Move</h3><p class="muted">${recommendation()}</p></div></section></div>`;
 }
 function rosterTable(players) {
-  return `<table class="table"><thead><tr><th>Player</th><th>Pos</th><th>Role</th><th>Salary</th><th>Contract</th><th></th></tr></thead><tbody>${players.map((p) => `<tr><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div><div class="playerName">${escapeHtml(p.name)}</div><div class="mini">${escapeHtml(p.archetype)} · ${personaHint(p)} · ${escapeHtml(firstTag(p.strengths))}</div></div></div></td><td>${escapeHtml(p.pos)}</td><td><span class="pill">${visibleGrade(p)}</span></td><td>${shortMoney(p.salary)}</td><td>${p.years} yr</td><td><button class="btn secondary" data-view="${escapeAttr(p.id)}">Scout</button> ${S.roster.find((x) => x.id === p.id) ? `<button class="btn danger" data-waive="${escapeAttr(p.id)}">Waive</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="6"><div class="empty">No players yet.</div></td></tr>`}</tbody></table>`;
+  return `<table class="table"><thead><tr><th>Player</th><th>Pos</th><th>Role</th><th title="How much she trusts this franchise. Minutes in the eight raise it; sitting drops it.">Bond</th><th>Salary</th><th>Contract</th><th></th></tr></thead><tbody>${players.map((p) => `<tr><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div><div class="playerName">${escapeHtml(p.name)}</div><div class="mini">${escapeHtml(p.archetype)} · ${personaHint(p)} · ${escapeHtml(firstTag(p.strengths))}</div></div></div></td><td>${escapeHtml(p.pos)}</td><td><span class="pill">${visibleGrade(p)}</span></td><td title="Minutes in the eight raise bond; sitting drops it.">${Math.round(p.bond || 50)}</td><td>${shortMoney(p.salary)}</td><td>${p.years} yr</td><td><button class="btn secondary" data-view="${escapeAttr(p.id)}">Scout</button> ${S.roster.find((x) => x.id === p.id) ? `<button class="btn danger" data-waive="${escapeAttr(p.id)}">Waive</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="7"><div class="empty">No players yet.</div></td></tr>`}</tbody></table>`;
 }
 function positionBalance() {
   return ["G", "F", "C"]
@@ -1519,7 +1525,7 @@ function npcOfferList() {
 }
 function checkRow(p, side) {
   const checked = trade[side].includes(p.id);
-  return `<label class="checkRow"><input type="checkbox" data-trade-side="${side}" value="${escapeAttr(p.id)}" ${checked ? "checked" : ""}>${portraitHtml(p, "sm")}<div><b>${escapeHtml(p.name)}</b> <span class="pill">${escapeHtml(p.pos)}</span> ${p.protected ? '<span class="pill bad">protected cost</span>' : ""}<div class="mini">${escapeHtml(visibleGrade(p))} · ${shortMoney(p.salary)} · ${escapeHtml(String(p.scouting || "").slice(0, 76))}...</div></div></label>`;
+  return `<label class="checkRow"><input type="checkbox" data-trade-side="${side}" value="${escapeAttr(p.id)}" ${checked ? "checked" : ""}>${portraitHtml(p, "sm")}<div><b>${escapeHtml(p.name)}</b> <span class="pill">${escapeHtml(p.pos)}</span> ${p.protected ? '<span class="pill bad">protected cost</span>' : ""}${p.tradeBlessed ? `<span class="pill good" title="Green-lit exit. This package gets +${lockerKnobs().blessedTradeValue || 160} trade value.">Green-lit +${lockerKnobs().blessedTradeValue || 160}</span>` : ""}<div class="mini">${escapeHtml(visibleGrade(p))} · ${shortMoney(p.salary)} · bond ${Math.round(p.bond || 50)} · ${escapeHtml(String(p.scouting || "").slice(0, 76))}...</div></div></label>`;
 }
 function sumSelected(players, ids) {
   return players.filter((p) => ids.includes(p.id)).reduce((a, p) => a + p.salary, 0);
@@ -1615,9 +1621,10 @@ function evaluateTrade(other) {
   if (uPlayers.some((p) => p.pos.includes(partnerNeed))) userValue += 120;
   const blessed = uPlayers.filter((p) => p.tradeBlessed);
   if (blessed.length) {
-    userValue += blessed.length * (lockerKnobs().blessedTradeValue || 160);
+    const bump = lockerKnobs().blessedTradeValue || 160;
+    userValue += blessed.length * bump;
     advice.push(
-      `${blessed.map((p) => p.name).join(", ")} asked out — the partner will take her cheaper.`,
+      `${blessed.map((p) => p.name).join(", ")} is green-lit — this offer gets +${bump} trade value because she asked out.`,
     );
   }
   const ratio = userValue / (otherValue || 1);
@@ -2712,7 +2719,7 @@ function gameDayView() {
     : `<div style="margin-top:10px"><button class="btn" data-scout="${g.id}">Scout Opponent</button><p class="muted" style="margin-top:8px">Skipping the scout means flying blind. You can still set a plan, but you won't know which lane to defend.</p></div>`;
   const planBlock = `<div class="actions" style="margin-top:10px"><button class="btn ${gp.plan === "pack" ? "" : "secondary"}" data-plan="${g.id}|pack">Pack the Paint</button><button class="btn ${gp.plan === "extend" ? "" : "secondary"}" data-plan="${g.id}|extend">Extend Defense</button>${gp.plan ? `<button class="btn ghost" data-plan="${g.id}|none">Clear</button>` : ""}</div>`;
   const rotationRow = (p, role, idx) =>
-    `<tr ${role === "injured" ? 'style="opacity:.5"' : ""}><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div class="playerName">${escapeHtml(p.name)}</div></div></td><td>${escapeHtml(p.pos)}</td><td>${injuryBadge(p)}</td><td>${p.mood || 60}</td><td>${p.age || "—"}</td><td class="actions">${
+    `<tr ${role === "injured" ? 'style="opacity:.5"' : ""}><td><div style="display:flex;gap:10px;align-items:center">${portraitHtml(p, "sm")}<div class="playerName">${escapeHtml(p.name)}</div></div></td><td>${escapeHtml(p.pos)}</td><td>${injuryBadge(p)}</td><td>${p.mood || 60}</td><td title="Minutes in the eight raise bond; sitting drops it.">${Math.round(p.bond || 50)}</td><td>${p.age || "—"}</td><td class="actions">${
       role === "injured"
         ? ""
         : `${`<button class="btn ghost" data-rotate-up="${escapeAttr(p.id)}" ${idx === 0 ? "disabled" : ""}>Up</button><button class="btn ghost" data-rotate-down="${escapeAttr(p.id)}" ${idx === lastHealthyIdx ? "disabled" : ""}>Down</button>`}${
@@ -2721,7 +2728,7 @@ function gameDayView() {
               : `<button class="btn secondary" data-start="${escapeAttr(p.id)}" title="Put her in the eight. Shared starts build on-court pairs and raise bond.">Start</button>`
           }`
     }</td></tr>`;
-  const rotationTable = `<table class="table"><thead><tr><th>Player</th><th>Pos</th><th>Status</th><th>Mood</th><th>Age</th><th></th></tr></thead><tbody>${topRotation.map((p, idx) => rotationRow(p, "start", idx)).join("")}${bench.map((p, i) => rotationRow(p, "bench", i + topRotation.length)).join("")}${injuredRotation
+  const rotationTable = `<table class="table"><thead><tr><th>Player</th><th>Pos</th><th>Status</th><th>Mood</th><th title="How much she trusts this franchise">Bond</th><th>Age</th><th></th></tr></thead><tbody>${topRotation.map((p, idx) => rotationRow(p, "start", idx)).join("")}${bench.map((p, i) => rotationRow(p, "bench", i + topRotation.length)).join("")}${injuredRotation
     .map((p) => rotationRow(p, "injured"))
     .join("")}</tbody></table>`;
   return `<section class="card"><div class="sectionTitle"><h3>Game Day · Week ${g.week} · ${isHome ? "vs" : "at"} ${opp.name}</h3><span>${opp.id} ${oppRec.w}-${oppRec.l}</span></div><div class="cardPad"><div class="layout2"><section><h3 style="margin-top:0">Opponent</h3><p class="muted">${opp.name} · ${oppRec.w}-${oppRec.l} · power index ${oppPower.overall}</p>${scoutBlock}<h3 style="margin-top:18px">Your Game Plan</h3>${planBlock}</section><section><h3 style="margin-top:0">Your Prep</h3><p class="muted">Coaching Focus: <b>${currentFocusLabel()}</b></p><p class="muted">Plan: <b>${gp.plan === "pack" ? "Pack the Paint" : gp.plan === "extend" ? "Extend Defense" : "Not set"}</b></p><p class="muted">Power Index: <b>${myPower.overall}</b> · Per ${myPower.perO}/${myPower.perD} · Int ${myPower.intO}/${myPower.intD}</p><p class="muted">Injured players: <b>${injuredCount}</b></p></section></div><h3 style="margin-top:18px">Your Rotation</h3><p class="muted">Reorder the full depth chart. The first eight healthy names play. Minutes there raise bond and grow on-court pairs. Sit a Competitor three games in a row and she may file to leave. Injured players cannot be activated.</p>${rotationTable}<div class="actions" style="margin-top:18px"><button class="btn" data-action="playQueuedGame" style="font-size:15px;padding:14px 20px">Play Game →</button><button class="btn secondary" data-action="closeGameDay">Hold Off</button></div></div></section>`;
@@ -4925,6 +4932,7 @@ function spendInfluence(kind, playerId) {
   if (!player) return toast("Pick a player to spend influence on.");
   if (kind === "bless" && !player.wantsOut) return toast(`${player.name} is not asking out.`);
   recordUndo("locker-room influence");
+  const knobs = lockerKnobs();
   S.lockerRoom.influence -= 1;
   if (kind === "closed-door") {
     player.mood = clampMood((player.mood || 60) + 8);
@@ -4935,8 +4943,18 @@ function spendInfluence(kind, playerId) {
       if (star.hiddenTrait === "fragile-ego")
         S.lockerRoom.heat = Math.min(40, (S.lockerRoom.heat || 0) + 4);
     }
-    addLog("Closed door", `Sat down with ${player.name}.`);
-    pushLockerEvent(`Closed door with ${player.name}.`);
+    const hold = knobs.suppressWeeks || 2;
+    S.lockerRoom.suppressedUntilWeek = Math.max(
+      S.lockerRoom.suppressedUntilWeek || 0,
+      (S.week || 1) + hold,
+    );
+    addLog(
+      "Closed door",
+      `Sat down with ${player.name}. Tension will sting less for ${hold} weeks.`,
+    );
+    pushLockerEvent(
+      `Closed door with ${player.name}. Chemistry penalty softened for ${hold} weeks.`,
+    );
     toast(`Closed door with ${player.name}.`);
   } else if (kind === "campaign") {
     S.lockerRoom.campaignId = player.id;
@@ -4948,9 +4966,12 @@ function spendInfluence(kind, playerId) {
     player.tradeBlessed = true;
     player.mood = clampMood((player.mood || 60) + 4);
     S.lockerRoom.heat = Math.max(0, (S.lockerRoom.heat || 0) - 6);
-    addLog("Exit granted", `${player.name} can be moved without cratering a pact partner.`);
+    addLog(
+      "Exit granted",
+      `${player.name} can be moved without cratering a pact partner, and the trade desk values her +${knobs.blessedTradeValue || 160}.`,
+    );
     pushLockerEvent(`Green-lit ${player.name}'s exit.`);
-    toast(`${player.name} is available.`);
+    toast(`${player.name} is available to trade.`);
   }
   save();
   render();
@@ -5018,6 +5039,7 @@ function resetSeasonIntimacy() {
   S.lockerRoom.campaignId = null;
   S.lockerRoom.lastCoreIds = [];
   S.lockerRoom.seasonHeatPeak = 0;
+  S.lockerRoom.suppressedUntilWeek = 0;
 }
 function tickLockerRoom(week = S.week) {
   if (!S.lockerRoom) return;
@@ -5231,7 +5253,7 @@ function lockerRoomSection() {
   const lockedHelp = locked ? CULTURE_HELP[S.lockerRoom.culture] : null;
   const cultureLine = lockedHelp
     ? `<p class="muted">Identity: <b>${escapeHtml(lockedHelp.label)}</b> (locked this season). ${escapeHtml(lockedHelp.effect)}</p>`
-    : `<p class="muted">Play ${need} weeks in the same style, then claim one identity for the rest of the season.</p>
+    : `<p class="muted">Play ${need} weeks in a style, then claim one identity. Grit, Lab, and Star can all tick in the same week if the eight qualifies for more than one — you still pick only one to lock.</p>
        <div class="tiles" style="margin-top:8px">${["grit", "lab", "star"]
          .map((id) => {
            const help = CULTURE_HELP[id];
@@ -5243,11 +5265,11 @@ function lockerRoomSection() {
   const captainWeek = knobs.captainWeek || 6;
   const captainMax = knobs.captainTensionMax || 40;
   const captainBlock = captain
-    ? `<p class="muted">Captain: <b>${escapeHtml(captain.name)}</b>. She cools the room a little every week and adds a playoff bump. Sitting her heats the room back up.</p>`
+    ? `<p class="muted">Captain: <b>${escapeHtml(captain.name)}</b>. She cools the room a little every week. In the playoffs she tightens games by +2 (less random blowout variance). Sitting her heats the room back up.</p>`
     : S.week >= captainWeek
-      ? `<div class="field"><label>Nominate captain ${helpMark(`After week ${captainWeek}, if tension is under ${captainMax}. Teammates vote; clashes and low bond can sink it.`)}</label><select id="lr-captain">${playerOpts}</select></div>
-         <div class="actions"><button class="btn secondary" data-action="nominateCaptain" title="The room votes. Glue, loyal vets, and high-bond teammates tend to say yes." ${teamTensionScore(S.team.abbr) > captainMax ? "disabled" : ""}>Hold the vote</button></div>`
-      : `<p class="muted">Captain vote opens week ${captainWeek} if tension is under ${captainMax}. A captain cools the room weekly and helps in the playoffs.</p>`;
+      ? `<div class="field"><label>Nominate captain ${helpMark(`After week ${captainWeek}, if tension is under ${captainMax}. Teammates vote; clashes and low bond can sink it. A captain also tightens playoff games by +2.`)}</label><select id="lr-captain">${playerOpts}</select></div>
+         <div class="actions"><button class="btn secondary" data-action="nominateCaptain" title="The room votes. Glue, loyal vets, and high-bond teammates tend to say yes. Winner also tightens playoff scoring by +2." ${teamTensionScore(S.team.abbr) > captainMax ? "disabled" : ""}>Hold the vote</button></div>`
+      : `<p class="muted">Captain vote opens week ${captainWeek} if tension is under ${captainMax}. A captain cools the room weekly and tightens playoff games by +2 (fewer random blowouts).</p>`;
   const events = ((S.lockerRoom && S.lockerRoom.events) || [])
     .slice(0, 4)
     .map(
@@ -5258,8 +5280,18 @@ function lockerRoomSection() {
   const campaignLine = campaign
     ? `Currently campaigning <b>${escapeHtml(campaign.name)}</b> for awards.`
     : "Pick a player, then Campaign to push her for MVP or Rookie of the Year.";
-  return `<section class="card"><div class="sectionTitle"><h3>Locker Room</h3><span>tension ${report.tension} · chemistry ${Math.round(report.chemistry * 100)}%</span></div><div class="cardPad"><details class="ratingGlossary"><summary>How the locker room works</summary><p><b>Bond</b> is how much she trusts this franchise. Minutes in the top eight raise it; sitting drops it. High-bond mentors re-sign cheaper. Competitors who sit too often may file or walk.</p><p><b>Tension</b> is how on-edge the eight are. Clashing personalities raise it. On-court pairs and a captain lower it. High tension makes the team play worse.</p><p><b>Influence</b> is one sit-down per week: Closed door cools her, Campaign pushes awards, Green-light exit lets a restless player be traded cleanly.</p><p><b>Identity</b> is a season-long culture claim after ${need} weeks of the same style: Playoff Grit, Young Lab, or Star Vehicle.</p></details>
-    <div class="meter"><span>Team tension ${helpMark("How on-edge the top eight are. Clashes raise it. Pairs and a captain lower it. High tension hurts play and can freeze drama players out of the box score.")}</span><div class="bar"><i style="width:${report.tension}%"></i></div><b>${report.tension}</b></div>
+  const suppressLeft =
+    S.lockerRoom && S.week < (S.lockerRoom.suppressedUntilWeek || 0)
+      ? S.lockerRoom.suppressedUntilWeek - S.week
+      : 0;
+  const calmLine = report.calm
+    ? `<span class="pill good" title="Tension is under 25. Hidden traits stay quieter and blowups are off the table.">Room is calm</span>`
+    : "";
+  const suppressLine = suppressLeft
+    ? `<p class="muted">Closed-door hangover: tension hurts play less for ${suppressLeft} more week${suppressLeft === 1 ? "" : "s"}.</p>`
+    : "";
+  return `<section class="card"><div class="sectionTitle"><h3>Locker Room</h3><span>tension ${report.tension} · chemistry ${Math.round(report.chemistry * 100)}%${report.calm ? " · calm" : ""}</span></div><div class="cardPad"><details class="ratingGlossary"><summary>How the locker room works</summary><p><b>Bond</b> is how much she trusts this franchise. Minutes in the top eight raise it; sitting drops it. High-bond mentors re-sign cheaper. Competitors who sit too often may file or walk.</p><p><b>Tension</b> is how on-edge the eight are. Clashing personalities raise it. On-court pairs and a captain lower it. Under 25 is calm. High tension makes the team play worse.</p><p><b>Influence</b> is one sit-down per week: Closed door cools her and softens tension's hit on play for 2 weeks, Campaign pushes awards, Green-light exit lets a restless player be traded with a +160 value bump.</p><p><b>Identity</b> is a season-long culture claim after ${need} weeks. Playoff Grit, Young Lab, and Star Vehicle can all tick in the same week; you still lock only one.</p></details>
+    <div class="meter"><span>Team tension ${helpMark("How on-edge the top eight are. Clashes raise it. Pairs and a captain lower it. Under 25 is calm. High tension hurts play and can freeze drama players out of the box score.")} ${calmLine}</span><div class="bar"><i style="width:${report.tension}%"></i></div><b>${report.tension}</b></div>${suppressLine}
     ${captainBlock}${cultureLine}
     <div class="layout2" style="margin-top:12px"><div><h3>On-court pairs ${helpMark("Players who share the eight build chemistry. 6 starts = pair (calms the room). 12 = run-it-back pact (bigger calm; splitting them hurts both).")}</h3>${pairingHtml || `<div class="mini">Share the floor for ${knobs.pairStarts || 6} starts to become a pair; ${knobs.pactStarts || 12} for a run-it-back pact.</div>`}</div><div><h3>Clashes ${helpMark("Personality matchups that raise tension when both are in the eight. Hover a persona chip on a player card to see what it means.")}</h3>${
       report.conflicts.length
@@ -5684,6 +5716,7 @@ if (typeof module !== "undefined" && module.exports) {
     pairingStatusLabel,
     lockerRoomSection,
     lockerReadForPlayer,
+    rosterTable,
     userLockerReport,
     teamChemistryMult,
     teamTensionScore,
