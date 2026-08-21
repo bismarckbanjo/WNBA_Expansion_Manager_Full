@@ -40,6 +40,35 @@ test("escapeHtml neutralizes HTML/script injection", () => {
   assert.strictEqual(g.escapeHtml(null), "");
 });
 
+test("2026 CBA numbers match the published cap, max, and floor", () => {
+  const g = loadGame(1);
+  const { cap, cba } = g.DATA;
+  assert.strictEqual(cap, 7000000);
+  assert.strictEqual(cba.supermax, 1400000);
+  assert.strictEqual(cba.max, 1190000);
+  assert.strictEqual(cba.minRookie, 270000);
+  assert.strictEqual(cba.minVeteran, 277500);
+  const aja = g.DATA.teams.flatMap((t) => t.players).find((p) => p.name === "A'ja Wilson");
+  const clark = g.DATA.teams.flatMap((t) => t.players).find((p) => p.name === "Caitlin Clark");
+  assert.strictEqual(aja.salary, 1400000);
+  assert.strictEqual(clark.salary, 528846);
+  for (const team of g.DATA.teams) {
+    for (const player of team.players) {
+      assert.ok(player.salary >= cba.minRookie, `${player.name} below rookie min`);
+      assert.ok(player.salary <= cba.supermax, `${player.name} above supermax`);
+    }
+  }
+});
+
+test("generated rookies and waivers use 2026 CBA scale", () => {
+  const g = loadGame(1);
+  const rookies = g.generateRookieClass(2028);
+  assert.strictEqual(rookies[0].salary, g.DATA.cba.rookieScale[0]);
+  assert.ok(rookies.every((p) => p.salary >= g.DATA.cba.minRookie));
+  const waivers = g.generateYearlyWaivers(2027);
+  assert.ok(waivers.every((p) => p.salary >= g.DATA.cba.minVeteran));
+});
+
 test("composite weights sum to 1 (flat ratings map to themselves)", () => {
   const g = loadGame(1);
   assert.strictEqual(g.composite(mkPlayer(70)), 70);

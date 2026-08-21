@@ -7,6 +7,17 @@ const ACTIVE_SLOT_KEY = "wnbaExpansion.activeSlot.v1";
 const SAVE_INDEX_KEY = "wnbaExpansion.saveIndex.v1";
 const SLOT_PREFIX = "wnbaExpansion.slot.v1.";
 const SAVE_VERSION = 7;
+function cbaValue(key, fallback) {
+  const cba = DATA.cba || {};
+  const value = cba[key];
+  return Number.isFinite(value) ? value : fallback;
+}
+function rookieScaleSalary(pickNumber) {
+  const scale = (DATA.cba && DATA.cba.rookieScale) || [];
+  const idx = Math.max(0, pickNumber - 1);
+  if (Number.isFinite(scale[idx])) return scale[idx];
+  return cbaValue("minRookie", 270000);
+}
 const money = (n) => "$" + Math.round(n).toLocaleString();
 const shortMoney = (n) =>
   n >= 1000000
@@ -155,7 +166,7 @@ function freshState() {
         text: "Carry every position group: G, F, C",
         done: false,
       },
-      { id: "cap", text: "Stay below the simplified cap", done: false },
+      { id: "cap", text: "Stay below the 2026 salary cap", done: false },
       {
         id: "future",
         text: "Preserve at least 2 future pick assets",
@@ -1201,7 +1212,7 @@ function topbar() {
       : titles[tab];
   const sub = S.offseason
     ? `Stage: ${offseasonStageLabel(S.offseason.stage)} · Year ${S.year} → ${S.year + 1}`
-    : `${S.phase} · Year ${S.year} · Week ${S.week} · Simplified cap ${money(DATA.cap)}`;
+    : `${S.phase} · Year ${S.year} · Week ${S.week} · 2026 cap ${money(DATA.cap)}`;
   // Hide the topbar "Play Next Game" when the main pane already has a primary
   // action button (Game Day / post-game / offseason / awards) — avoids two
   // conflicting "advance" buttons that confused the flow.
@@ -1261,7 +1272,7 @@ function kpis() {
 function dashboard() {
   const best = bestPlayer();
   const weak = weakestPositionGroup();
-  return `${kpis()}${nextGameBrief()}<div class="layout2" style="margin-top:18px"><section class="card"><div class="sectionTitle"><h3>Owner Briefing</h3><span>Visible franchise pulse and next actions</span></div><div class="cardPad"><div class="layout3"><div><h3>${escapeHtml(S.team.city)} ${escapeHtml(S.team.nickname)}</h3><p class="muted">${escapeHtml(S.team.arena)}. You are building a one-season expansion roster under a simplified cap while protecting future optionality.</p><button class="btn" data-tab="${expansionDraftOpen() ? "draft" : "roster"}">${expansionDraftOpen() ? "Open Draft Room" : "Open Roster"}</button></div><div class="impact">${impactBars()}</div><div class="log"><div class="logItem"><b>Next opponent</b><p class="muted">${escapeHtml(nextOpponentSummary())}</p></div><div class="logItem"><b>Best player</b><p class="muted">${best ? escapeHtml(best.name) + " · " + escapeHtml(visibleGrade(best)) : "No roster yet."}</p></div><div class="logItem"><b>Weakest group</b><p class="muted">${escapeHtml(weak.pos)} depth · ${weak.count}</p></div><div class="logItem"><b>Recommended next move</b><p class="muted">${escapeHtml(recommendation())}</p></div><div class="logItem"><b>Locker room</b><p class="muted">${S.roster.length ? `Tension ${userLockerReport().tension} (lower is calmer) · chemistry ${Math.round(userLockerReport().chemistry * 100)}%. Open Coaching to manage the room.` : "Draft a roster to start reading the room."}</p></div></div></div></div></section><section class="card"><div class="sectionTitle"><h3>Front Office Feed</h3><span>${S.log.length} events</span></div><div class="cardPad log">${
+  return `${kpis()}${nextGameBrief()}<div class="layout2" style="margin-top:18px"><section class="card"><div class="sectionTitle"><h3>Owner Briefing</h3><span>Visible franchise pulse and next actions</span></div><div class="cardPad"><div class="layout3"><div><h3>${escapeHtml(S.team.city)} ${escapeHtml(S.team.nickname)}</h3><p class="muted">${escapeHtml(S.team.arena)}. You are building a one-season expansion roster under the 2026 salary cap while protecting future optionality.</p><button class="btn" data-tab="${expansionDraftOpen() ? "draft" : "roster"}">${expansionDraftOpen() ? "Open Draft Room" : "Open Roster"}</button></div><div class="impact">${impactBars()}</div><div class="log"><div class="logItem"><b>Next opponent</b><p class="muted">${escapeHtml(nextOpponentSummary())}</p></div><div class="logItem"><b>Best player</b><p class="muted">${best ? escapeHtml(best.name) + " · " + escapeHtml(visibleGrade(best)) : "No roster yet."}</p></div><div class="logItem"><b>Weakest group</b><p class="muted">${escapeHtml(weak.pos)} depth · ${weak.count}</p></div><div class="logItem"><b>Recommended next move</b><p class="muted">${escapeHtml(recommendation())}</p></div><div class="logItem"><b>Locker room</b><p class="muted">${S.roster.length ? `Tension ${userLockerReport().tension} (lower is calmer) · chemistry ${Math.round(userLockerReport().chemistry * 100)}%. Open Coaching to manage the room.` : "Draft a roster to start reading the room."}</p></div></div></div></div></section><section class="card"><div class="sectionTitle"><h3>Front Office Feed</h3><span>${S.log.length} events</span></div><div class="cardPad log">${
     S.log
       .slice(0, 8)
       .map(
@@ -1885,7 +1896,7 @@ function generateYearlyWaivers(year) {
       name,
       pos,
       team: "FA",
-      salary: 260000 + rand(0, 90000),
+      salary: cbaValue("minVeteran", 277500) + rand(0, 80000),
       years: 1,
       scouting: "Yearly waiver addition — cheap veteran minutes and practice-body depth.",
       strengths: ratingsTop(ratings),
@@ -3779,8 +3790,7 @@ function generateRookieClass(year) {
         iq: clampRating(base + rand(-5, 12)),
         potential: pot,
       };
-      const salary =
-        200000 + (t.arch === "star" ? 500000 : t.arch === "starter" ? 250000 : 0) + rand(0, 80000);
+      const salary = rookieScaleSalary(pickNo + 1);
       out.push({
         id: `rookie-${year}-${pickNo++}`,
         name,
@@ -5550,7 +5560,7 @@ function adminView() {
         )
         .join("")
     : '<div class="empty">Your current franchise will appear here after autosave.</div>';
-  return `<section class="card"><div class="sectionTitle"><h3>Add Custom Rookie</h3><span>Players added here join the named class for their draft year</span></div><div class="cardPad"><div class="layout2"><div><div class="field"><label>Name</label><input id="cr-name" placeholder="Player Name"></div><div class="field"><label>Position</label><select id="cr-pos">${POSITION_OPTIONS.map((p) => `<option value="${p}">${p}</option>`).join("")}</select></div><div class="field"><label>College / Origin</label><input id="cr-college" placeholder="UConn"></div><div class="field"><label>Draft Year</label><input id="cr-year" type="number" value="${nextYear}" min="${nextYear}"></div><div class="field"><label>Archetype</label><select id="cr-arch">${ARCHETYPE_OPTIONS.map((a) => `<option value="${a}">${a}</option>`).join("")}</select></div><div class="field"><label>Salary ($)</label><input id="cr-salary" type="number" value="400000" min="80000" step="10000"></div><div class="field"><label>Contract Years</label><input id="cr-years" type="number" value="4" min="1" max="4"></div></div><div><div class="ratingGrid">${ratingFields}</div><div class="field"><label>Scouting (optional)</label><textarea id="cr-scouting" rows="2" placeholder="Auto-filled from archetype if blank"></textarea></div><div class="field"><label>Strengths (optional)</label><input id="cr-strengths" placeholder="Auto-derived from top ratings if blank"></div><div class="field"><label>Weaknesses (optional)</label><input id="cr-weaknesses" placeholder="Auto-derived from low ratings if blank"></div><div class="actions"><button class="btn" data-action="addCustomRookie">Add to Draft Class</button></div></div></div><hr style="border:0;border-top:1px solid var(--line);margin:24px 0"><h3>Current Custom Rookies</h3>${list}<hr style="border:0;border-top:1px solid var(--line);margin:24px 0"><div class="sectionTitle"><h3>Save Slots</h3><span>Current: ${escapeHtml(S.saveName)}</span></div><div class="cardPad"><div class="field"><label>Name this copy</label><input id="save-slot-name" maxlength="60" placeholder="My second franchise"></div><div class="actions"><button class="btn" data-action="createSaveSlot">Save Current Franchise As…</button></div><div class="log" style="margin-top:16px">${slotList}</div></div><div class="sectionTitle"><h3>Backup &amp; Recovery</h3><span>Export, import, or reset the active save.</span></div><div class="cardPad"><div class="layout2"><button class="btn" data-action="exportSave">Export Save</button><button class="btn secondary" data-action="importSave">Validate Import</button><button class="btn ghost" data-action="reset">Reset Active Save</button></div><div class="field"><label>Paste save JSON here</label><textarea id="saveImport" rows="4" placeholder="Paste exported save JSON"></textarea></div>${importPreview}<div class="logItem">Save version <b>${S.saveVersion}</b> · Balance version <b>${S.balanceVersion}</b> · Seed <b>${S.rngSeed}</b> · Last saved <b>${S.lastSaved ? new Date(S.lastSaved).toLocaleString() : "unknown"}</b></div></div></div></section>`;
+  return `<section class="card"><div class="sectionTitle"><h3>Add Custom Rookie</h3><span>Players added here join the named class for their draft year</span></div><div class="cardPad"><div class="layout2"><div><div class="field"><label>Name</label><input id="cr-name" placeholder="Player Name"></div><div class="field"><label>Position</label><select id="cr-pos">${POSITION_OPTIONS.map((p) => `<option value="${p}">${p}</option>`).join("")}</select></div><div class="field"><label>College / Origin</label><input id="cr-college" placeholder="UConn"></div><div class="field"><label>Draft Year</label><input id="cr-year" type="number" value="${nextYear}" min="${nextYear}"></div><div class="field"><label>Archetype</label><select id="cr-arch">${ARCHETYPE_OPTIONS.map((a) => `<option value="${a}">${a}</option>`).join("")}</select></div><div class="field"><label>Salary ($)</label><input id="cr-salary" type="number" value="400000" min="270000" step="10000"></div><div class="field"><label>Contract Years</label><input id="cr-years" type="number" value="4" min="1" max="4"></div></div><div><div class="ratingGrid">${ratingFields}</div><div class="field"><label>Scouting (optional)</label><textarea id="cr-scouting" rows="2" placeholder="Auto-filled from archetype if blank"></textarea></div><div class="field"><label>Strengths (optional)</label><input id="cr-strengths" placeholder="Auto-derived from top ratings if blank"></div><div class="field"><label>Weaknesses (optional)</label><input id="cr-weaknesses" placeholder="Auto-derived from low ratings if blank"></div><div class="actions"><button class="btn" data-action="addCustomRookie">Add to Draft Class</button></div></div></div><hr style="border:0;border-top:1px solid var(--line);margin:24px 0"><h3>Current Custom Rookies</h3>${list}<hr style="border:0;border-top:1px solid var(--line);margin:24px 0"><div class="sectionTitle"><h3>Save Slots</h3><span>Current: ${escapeHtml(S.saveName)}</span></div><div class="cardPad"><div class="field"><label>Name this copy</label><input id="save-slot-name" maxlength="60" placeholder="My second franchise"></div><div class="actions"><button class="btn" data-action="createSaveSlot">Save Current Franchise As…</button></div><div class="log" style="margin-top:16px">${slotList}</div></div><div class="sectionTitle"><h3>Backup &amp; Recovery</h3><span>Export, import, or reset the active save.</span></div><div class="cardPad"><div class="layout2"><button class="btn" data-action="exportSave">Export Save</button><button class="btn secondary" data-action="importSave">Validate Import</button><button class="btn ghost" data-action="reset">Reset Active Save</button></div><div class="field"><label>Paste save JSON here</label><textarea id="saveImport" rows="4" placeholder="Paste exported save JSON"></textarea></div>${importPreview}<div class="logItem">Save version <b>${S.saveVersion}</b> · Balance version <b>${S.balanceVersion}</b> · Seed <b>${S.rngSeed}</b> · Last saved <b>${S.lastSaved ? new Date(S.lastSaved).toLocaleString() : "unknown"}</b></div></div></div></section>`;
 }
 function readField(id) {
   const el = document.getElementById(id);
@@ -5564,7 +5574,7 @@ function addCustomRookie() {
   const year = parseInt(readField("cr-year"), 10);
   if (!year || year < S.year + 1) return toast(`Draft year must be ${S.year + 1} or later.`);
   const archetype = readField("cr-arch");
-  const salary = Math.max(80000, parseInt(readField("cr-salary"), 10) || 0);
+  const salary = Math.max(cbaValue("minRookie", 270000), parseInt(readField("cr-salary"), 10) || 0);
   const years = Math.max(1, Math.min(4, parseInt(readField("cr-years"), 10) || 4));
   const ratings = {};
   RATING_KEYS.forEach((k) => (ratings[k] = clampRating(parseInt(readField("cr-" + k), 10) || 60)));
@@ -5688,6 +5698,7 @@ if (typeof module !== "undefined" && module.exports) {
     aiPickRookie,
     refreshWaiverClass,
     generateYearlyWaivers,
+    generateRookieClass,
     runNpcFreeAgency,
     resignUserPlayer,
     walkUserPlayer,
@@ -5707,6 +5718,7 @@ if (typeof module !== "undefined" && module.exports) {
     expansionDraftOpen,
     applyBulkCoaching,
     rotationMood,
+    DATA,
     ENGINE,
     personaLabel,
     hiddenLabel,

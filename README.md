@@ -27,9 +27,9 @@ Then open `http://localhost:8080`.
 
 ## Notes
 
-The roster scaffold is grounded in publicly available 2026 WNBA opening-roster reporting, but ratings, salaries, contract years, player protections, trade values, and scouting notes are game abstractions for prototype gameplay.
+The roster scaffold is grounded in publicly available 2026 WNBA opening-roster reporting. Ratings, contract years, player protections, trade values, and scouting notes are game abstractions. Salaries use 2026 CBA rates: Her Hoop Stats where a name matches, otherwise the published minimum / rookie scale / an inferred veteran band.
 
-The simplified cap is set at $7.0M for game balance.
+The team salary cap is $7.0M (2026 CBA). Supermax $1.4M, standard max $1.19M, rookie minimum $270K.
 
 See `DATA_SOURCES.md` for the factual/fictional data boundary and refresh procedure.
 
