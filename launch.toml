@@ -1,11 +1,18 @@
+schema_version = 2
+id = "wnba-manager"
 name = "WNBA Manager"
 category = "games"
 
 [[service]]
+id = "server"
+port = 8016
+ready_url = "http://localhost:8016/"
+startup_timeout_seconds = 30
 name = "Game Server"
 cmd = "python3 -m http.server 8016"
 
 [[command]]
+id = "play"
 name = "Play in Browser"
 cmd = "open http://localhost:8016"
 detach = true
@@ -14,3 +21,8 @@ detach = true
 name = "Run Tests"
 cmd = "npm test"
 show_output = true
+
+# Michael-OS launcher: what Launch does (start, wait until ready, then open).
+[launch]
+services = ["server"]
+command = "play"
