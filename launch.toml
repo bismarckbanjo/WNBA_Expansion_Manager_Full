@@ -18,6 +18,7 @@ cmd = "open http://localhost:8016"
 detach = true
 
 [[command]]
+id = "run-tests"
 name = "Run Tests"
 cmd = "npm test"
 show_output = true
